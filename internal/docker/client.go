@@ -271,7 +271,8 @@ func (c *Client) CreateContainer(ctx context.Context, options CreateOptions) (st
 	requestBody.HostConfig.NanoCPUs = options.NanoCPUs
 	requestBody.HostConfig.PidsLimit = options.PIDsLimit
 	requestBody.HostConfig.Tmpfs = map[string]string{
-		"/tmp": fmt.Sprintf("rw,nosuid,nodev,noexec,size=%d", options.TmpfsBytes),
+		"/tmp":          fmt.Sprintf("rw,nosuid,nodev,noexec,size=%d", options.TmpfsBytes),
+		"/home/preview": fmt.Sprintf("rw,nosuid,nodev,exec,uid=65534,gid=65534,mode=0755,size=%d", options.TmpfsBytes),
 	}
 	if options.CodexAuthPath != "" {
 		requestBody.HostConfig.Mounts = append(requestBody.HostConfig.Mounts, struct {

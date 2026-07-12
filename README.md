@@ -228,6 +228,6 @@ Copy `.env.example` when running from a source checkout. Common settings are:
 
 ## Runtime isolation and security boundary
 
-Generated preview containers run as UID/GID `65534`, with a read-only root filesystem, ephemeral `/tmp`, all Linux capabilities dropped, `no-new-privileges`, no host ports or mounts, and CPU, memory, PID, log-size, and deployment-count limits.
+Generated preview containers run as UID/GID `65534`, with a read-only root filesystem, a no-exec ephemeral `/tmp`, an executable ephemeral `/home/preview` workspace, all Linux capabilities dropped, `no-new-privileges`, no host ports, and CPU, memory, PID, log-size, and deployment-count limits. The only supported host mount is the explicit read-only Codex auth opt-in described above.
 
 The platform still executes uploaded code. The orchestrator's Docker socket access is effectively host-root access even though the socket mount is read-only. Before allowing untrusted users or remote traffic, use a dedicated host or isolated Docker daemon, terminate TLS, set `API_TOKEN`, restrict egress, protect the Traefik dashboard, and consider a tightly scoped Docker socket proxy. Preview filesystems are ephemeral; application data and volumes are not persisted.

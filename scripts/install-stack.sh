@@ -292,9 +292,9 @@ RELEASE_BASE=https://github.com/$REPOSITORY/releases/download/$VERSION
 say "Downloading preview deployment $VERSION for $HOST_OS/$HOST_ARCH..."
 fetch "$RELEASE_BASE/checksums.txt" "$CHECKSUMS"
 fetch "$RELEASE_BASE/compose.yaml" "$COMPOSE_TMP"
-fetch "$RELEASE_BASE/.env.example" "$ENV_EXAMPLE_TMP"
+fetch "$RELEASE_BASE/env.example" "$ENV_EXAMPLE_TMP"
 verify_asset "$COMPOSE_TMP" compose.yaml "$CHECKSUMS"
-verify_asset "$ENV_EXAMPLE_TMP" .env.example "$CHECKSUMS"
+verify_asset "$ENV_EXAMPLE_TMP" env.example "$CHECKSUMS"
 
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$(dirname "$ENV_FILE")"

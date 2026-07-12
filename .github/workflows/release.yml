@@ -123,7 +123,7 @@ jobs:
           done
 
           cp compose.yaml dist/release/compose.yaml
-          cp .env.example dist/release/.env.example
+          cp .env.example dist/release/env.example
           cp scripts/install-stack.sh dist/release/install-stack.sh
           cp scripts/install-cli.sh dist/release/install-cli.sh
           chmod 0755 dist/release/install-stack.sh dist/release/install-cli.sh
@@ -132,7 +132,7 @@ jobs:
           sha256sum \
             previewctl_*.tar.gz \
             compose.yaml \
-            .env.example \
+            env.example \
             install-stack.sh \
             install-cli.sh \
             > checksums.txt
@@ -150,6 +150,6 @@ jobs:
             dist/release/previewctl_*.tar.gz
             dist/release/checksums.txt
             dist/release/compose.yaml
-            dist/release/.env.example
+            dist/release/env.example
             dist/release/install-stack.sh
             dist/release/install-cli.sh

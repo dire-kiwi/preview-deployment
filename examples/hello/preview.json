@@ -1,0 +1,8 @@
+{
+  "name": "hello example",
+  "port": 8080,
+  "args": [],
+  "env": {
+    "EXAMPLE_MODE": "preview"
+  }
+}

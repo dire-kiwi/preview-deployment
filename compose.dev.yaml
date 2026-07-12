@@ -1,0 +1,5 @@
+services:
+  orchestrator:
+    image: preview-deployment:dev
+    build:
+      context: .

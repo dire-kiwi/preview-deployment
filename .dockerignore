@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.git
+.github
+.gitignore
+compose*.yaml
+dist
+examples
+Makefile
+scripts
+*.zip
+README.md

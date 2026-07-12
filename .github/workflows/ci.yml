@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build commands
+        run: go build ./...
+
+      - name: Smoke-test the Docker image build
+        run: docker build --tag preview-deployment:ci .
+
+      - name: Check installer syntax
+        run: sh -n scripts/install-cli.sh scripts/install-stack.sh
+
+      - name: Validate production Compose file
+        env:
+          PREVIEW_DEPLOYMENT_VERSION: ci
+        run: docker compose --env-file .env.example --file compose.yaml config --quiet
+
+      - name: Validate development Compose overlay
+        env:
+          PREVIEW_DEPLOYMENT_VERSION: ci
+        run: docker compose --env-file .env.example --file compose.yaml --file compose.dev.yaml config --quiet

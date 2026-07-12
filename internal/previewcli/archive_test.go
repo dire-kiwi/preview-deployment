@@ -71,6 +71,31 @@ func TestPrepareArchiveExplicitManifestOverridesContextManifest(t *testing.T) {
 	}
 }
 
+func TestPrepareArchiveSkipsIgnoredSymlinks(t *testing.T) {
+	contextDirectory := t.TempDir()
+	writeTestFile(t, filepath.Join(contextDirectory, "Dockerfile"), 0o644, "FROM scratch\n")
+	writeTestFile(t, filepath.Join(contextDirectory, ".dockerignore"), 0o644, "node_modules\n")
+	writeTestFile(t, filepath.Join(contextDirectory, "node_modules", "package", "cli.js"), 0o644, "console.log('ok')\n")
+	if err := os.MkdirAll(filepath.Join(contextDirectory, "node_modules", ".bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../package/cli.js", filepath.Join(contextDirectory, "node_modules", ".bin", "package-cli")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	archivePath, cleanup, err := prepareArchive(contextDirectory, "")
+	if err != nil {
+		t.Fatalf("prepareArchive() error = %v", err)
+	}
+	defer cleanup()
+	entries := readTestZIP(t, archivePath)
+	for name := range entries {
+		if strings.HasPrefix(name, "node_modules/") {
+			t.Errorf("archive unexpectedly contains ignored entry %q", name)
+		}
+	}
+}
+
 func TestPrepareArchiveSynthesizesDockerfileManifest(t *testing.T) {
 	contextDirectory := t.TempDir()
 	writeTestFile(t, filepath.Join(contextDirectory, "Dockerfile"), 0o644, "FROM scratch\n")

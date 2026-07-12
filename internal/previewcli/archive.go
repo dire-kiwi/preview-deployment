@@ -232,6 +232,19 @@ func writeDockerContextArchive(destination *os.File, source, manifestSource stri
 			}
 			return nil
 		}
+		keepRegardless := name == "Dockerfile" || name == ".dockerignore"
+		if !keepRegardless && matcher != nil {
+			ignored, err := matcher.MatchesOrParentMatches(name)
+			if err != nil {
+				return fmt.Errorf("match .dockerignore for %q: %w", name, err)
+			}
+			if ignored {
+				if entry.IsDir() && !matcher.Exclusions() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
 
 		info, err := entry.Info()
 		if err != nil {
@@ -255,16 +268,6 @@ func writeDockerContextArchive(destination *os.File, source, manifestSource stri
 		}
 		if name == "preview.json" {
 			return nil
-		}
-		keepRegardless := name == "Dockerfile" || name == ".dockerignore"
-		if !keepRegardless && matcher != nil {
-			ignored, err := matcher.MatchesOrParentMatches(name)
-			if err != nil {
-				return fmt.Errorf("match .dockerignore for %q: %w", name, err)
-			}
-			if ignored {
-				return nil
-			}
 		}
 		if info.Size() < 0 || info.Size() > maxLocalContextFileBytes {
 			return fmt.Errorf("context file %q exceeds %d bytes", name, maxLocalContextFileBytes)

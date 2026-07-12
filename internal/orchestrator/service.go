@@ -328,6 +328,9 @@ func (s *Service) labels(id, image string, manifest bundle.Manifest, createdAt t
 		"traefik.http.routers." + router + ".service":                   router,
 		"traefik.http.services." + router + ".loadbalancer.server.port": strconv.Itoa(manifest.Port),
 	}
+	if s.config.PublicScheme == "https" {
+		labels["traefik.http.routers."+router+".tls"] = "true"
+	}
 	return labels
 }
 

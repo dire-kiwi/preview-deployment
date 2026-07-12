@@ -49,6 +49,19 @@ func TestLabelsConfigureTraefik(t *testing.T) {
 	}
 }
 
+func TestLabelsEnableTLSForHTTPS(t *testing.T) {
+	service := &Service{config: config.Config{
+		PreviewDomain:     "preview.example.test",
+		DockerNetwork:     "preview-network",
+		TraefikEntrypoint: "websecure",
+		PublicScheme:      "https",
+	}}
+	labels := service.labels("abc123abc123", "preview/image:latest", bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
+	if got := labels["traefik.http.routers.preview-abc123abc123.tls"]; got != "true" {
+		t.Fatalf("TLS label = %q, want true", got)
+	}
+}
+
 func TestEnvironmentIsSortedAndAddsPort(t *testing.T) {
 	got := environment(bundle.Manifest{Port: 9090, Env: map[string]string{"Z": "last", "A": "first"}})
 	want := []string{"A=first", "Z=last", "PORT=9090"}

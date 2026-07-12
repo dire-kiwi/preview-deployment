@@ -27,8 +27,9 @@ const (
 var deterministicZIPTime = time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 // prepareArchive returns source unchanged when it is already a ZIP, packages a
-// regular executable as root-level app, or packages a directory as one Docker
-// build-context ZIP. Directory manifests are marked build=dockerfile.
+// regular executable as root-level app, or packages a directory as one ZIP.
+// Directories default to Dockerfile builds, while an explicit runtime manifest
+// packages the ignored source tree without requiring a Dockerfile.
 func prepareArchive(source, manifest string) (string, func(), error) {
 	info, err := os.Lstat(source)
 	if err != nil {
@@ -47,7 +48,7 @@ func prepareArchive(source, manifest string) (string, func(), error) {
 		return "", func() {}, errors.New("deployment source must be a regular file or directory")
 	}
 
-	manifestContents, manifestSource, err := deploymentManifest(source, info, manifest)
+	manifestContents, manifestSource, directoryBuild, err := deploymentManifest(source, info, manifest)
 	if err != nil {
 		return "", func() {}, err
 	}
@@ -58,7 +59,7 @@ func prepareArchive(source, manifest string) (string, func(), error) {
 	archivePath := temporary.Name()
 	cleanup := func() { _ = os.Remove(archivePath) }
 	if info.IsDir() {
-		err = writeDockerContextArchive(temporary, source, manifestSource, manifestContents)
+		err = writeDirectoryArchive(temporary, source, manifestSource, manifestContents, directoryBuild)
 	} else {
 		err = writeDeploymentArchive(temporary, source, manifestContents)
 	}
@@ -74,10 +75,10 @@ func prepareArchive(source, manifest string) (string, func(), error) {
 	return archivePath, cleanup, nil
 }
 
-func deploymentManifest(source string, info fs.FileInfo, explicit string) ([]byte, string, error) {
+func deploymentManifest(source string, info fs.FileInfo, explicit string) ([]byte, string, string, error) {
 	if !info.IsDir() {
 		contents, err := readManifest(explicit)
-		return contents, explicit, err
+		return contents, explicit, "", err
 	}
 
 	manifestSource := explicit
@@ -87,13 +88,13 @@ func deploymentManifest(source string, info fs.FileInfo, explicit string) ([]byt
 		switch {
 		case err == nil:
 			if candidateInfo.Mode()&os.ModeSymlink != 0 || !candidateInfo.Mode().IsRegular() {
-				return nil, "", errors.New("context preview.json must be a regular file, not a symbolic link or special file")
+				return nil, "", "", errors.New("context preview.json must be a regular file, not a symbolic link or special file")
 			}
 			manifestSource = candidate
 		case errors.Is(err, os.ErrNotExist):
 			// A minimal manifest is synthesized below.
 		case err != nil:
-			return nil, "", fmt.Errorf("inspect context manifest: %w", err)
+			return nil, "", "", fmt.Errorf("inspect context manifest: %w", err)
 		}
 	}
 
@@ -102,25 +103,30 @@ func deploymentManifest(source string, info fs.FileInfo, explicit string) ([]byt
 		var err error
 		contents, err = readManifest(manifestSource)
 		if err != nil {
-			return nil, "", err
+			return nil, "", "", err
 		}
 	}
 	var value map[string]any
 	if err := json.Unmarshal(contents, &value); err != nil {
-		return nil, "", fmt.Errorf("manifest is not valid JSON: %w", err)
+		return nil, "", "", fmt.Errorf("manifest is not valid JSON: %w", err)
 	}
 	if value == nil {
-		return nil, "", errors.New("manifest must be a JSON object")
+		return nil, "", "", errors.New("manifest must be a JSON object")
 	}
-	if build, ok := value["build"]; ok && build != "" && build != "dockerfile" {
-		return nil, "", errors.New("directory deployment manifest build must be dockerfile")
+	build := "dockerfile"
+	if rawBuild, ok := value["build"]; ok && rawBuild != "" {
+		var valid bool
+		build, valid = rawBuild.(string)
+		if !valid || (build != "dockerfile" && build != "runtime") {
+			return nil, "", "", errors.New("directory deployment manifest build must be dockerfile or runtime")
+		}
 	}
-	value["build"] = "dockerfile"
+	value["build"] = build
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return nil, "", fmt.Errorf("encode deployment manifest: %w", err)
+		return nil, "", "", fmt.Errorf("encode deployment manifest: %w", err)
 	}
-	return encoded, manifestSource, nil
+	return encoded, manifestSource, build, nil
 }
 
 func looksLikeZIP(filename string) bool {
@@ -169,17 +175,19 @@ func readManifest(filename string) ([]byte, error) {
 	return contents, nil
 }
 
-func writeDockerContextArchive(destination *os.File, source, manifestSource string, manifest []byte) error {
-	dockerfile := filepath.Join(source, "Dockerfile")
-	dockerfileInfo, err := os.Lstat(dockerfile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return errors.New("Docker build context must contain a root-level Dockerfile")
+func writeDirectoryArchive(destination *os.File, source, manifestSource string, manifest []byte, build string) error {
+	if build == "dockerfile" {
+		dockerfile := filepath.Join(source, "Dockerfile")
+		dockerfileInfo, err := os.Lstat(dockerfile)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return errors.New("Docker build context must contain a root-level Dockerfile")
+			}
+			return fmt.Errorf("inspect Dockerfile: %w", err)
 		}
-		return fmt.Errorf("inspect Dockerfile: %w", err)
-	}
-	if dockerfileInfo.Mode()&os.ModeSymlink != 0 || !dockerfileInfo.Mode().IsRegular() {
-		return errors.New("root-level Dockerfile must be a regular file, not a symbolic link or special file")
+		if dockerfileInfo.Mode()&os.ModeSymlink != 0 || !dockerfileInfo.Mode().IsRegular() {
+			return errors.New("root-level Dockerfile must be a regular file, not a symbolic link or special file")
+		}
 	}
 
 	matcher, err := dockerIgnoreMatcher(source)
@@ -232,7 +240,7 @@ func writeDockerContextArchive(destination *os.File, source, manifestSource stri
 			}
 			return nil
 		}
-		keepRegardless := name == "Dockerfile" || name == ".dockerignore"
+		keepRegardless := name == ".dockerignore" || (build == "dockerfile" && name == "Dockerfile")
 		if !keepRegardless && matcher != nil {
 			ignored, err := matcher.MatchesOrParentMatches(name)
 			if err != nil {
@@ -286,10 +294,10 @@ func writeDockerContextArchive(destination *os.File, source, manifestSource stri
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("package Docker build context: %w", err)
+		return fmt.Errorf("package deployment directory: %w", err)
 	}
 	if len(manifest) == 0 {
-		return errors.New("Docker build context manifest is empty")
+		return errors.New("directory deployment manifest is empty")
 	}
 	if err := writeZIPBytes(archive, "preview.json", 0o644, manifest); err != nil {
 		return fmt.Errorf("package manifest: %w", err)

@@ -38,7 +38,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	service := orchestrator.New(dockerClient, cfg, logger)
+	service, err := orchestrator.New(dockerClient, cfg, logger)
+	if err != nil {
+		logger.Error("cannot initialize orchestrator", "error", err)
+		os.Exit(1)
+	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := service.CleanupOrphanPayloads(cleanupCtx); err != nil {
+		logger.Warn("could not clean up orphan runtime payloads", "error", err)
+	}
+	cleanupCancel()
 	httpAPI := api.New(service, dockerClient, logger, cfg.MaxUploadBytes, cfg.MaxBinaryBytes, cfg.APIToken)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,

@@ -114,6 +114,71 @@ func TestOpenDockerfileBundle(t *testing.T) {
 	}
 }
 
+func TestOpenRuntimeBundleRetainsValidatedSourceEntries(t *testing.T) {
+	filename := writeZIPEntries(t, []testZIPEntry{
+		{name: "preview.json", contents: []byte(`{"build":"runtime","runtime":"wordpress-tailwind","name":"wordpress","port":8080}`)},
+		{name: "theme/index.php", contents: []byte("<?php echo 'ok';")},
+		{name: "theme/start.sh", contents: []byte("#!/bin/bash\n"), mode: 0o755},
+	})
+	got, err := Open(filename, 1024*1024)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if got.BuildMode != BuildRuntime {
+		t.Fatalf("build mode = %v, want runtime", got.BuildMode)
+	}
+	if got.Manifest.Runtime != "wordpress-tailwind" {
+		t.Fatalf("runtime key = %q", got.Manifest.Runtime)
+	}
+	if len(got.App) != 0 || len(got.Context) != 2 {
+		t.Fatalf("runtime bundle source entries = %#v", got)
+	}
+	files := map[string]ContextFile{}
+	for _, file := range got.Context {
+		files[file.Name] = file
+	}
+	if _, exists := files["preview.json"]; exists {
+		t.Fatal("control manifest was retained in runtime source entries")
+	}
+	if string(files["theme/index.php"].Contents) != "<?php echo 'ok';" || files["theme/index.php"].Mode != 0o644 || files["theme/start.sh"].Mode != 0o755 {
+		t.Fatalf("runtime source entries = %#v", files)
+	}
+}
+
+func TestOpenRuntimeEnforcesAggregateUncompressedLimit(t *testing.T) {
+	manifest := []byte(`{"build":"runtime","runtime":"site"}`)
+	filename := writeZIP(t, map[string][]byte{
+		"preview.json": manifest,
+		"first.txt":    []byte("12345678"),
+		"second.txt":   []byte("abcdefgh"),
+	})
+	_, err := Open(filename, int64(len(manifest)+12))
+	if err == nil || !strings.Contains(err.Error(), "aggregate uncompressed limit") {
+		t.Fatalf("Open() error = %v, want aggregate runtime source limit", err)
+	}
+}
+
+func TestOpenRejectsUnsafeRuntimeKeys(t *testing.T) {
+	for _, runtime := range []string{
+		"",
+		"UPPER",
+		"../escape",
+		"runtime/key",
+		strings.Repeat("a", 65),
+	} {
+		t.Run(runtime, func(t *testing.T) {
+			filename := writeZIP(t, map[string][]byte{
+				"preview.json": []byte(fmt.Sprintf(`{"build":"runtime","runtime":%q}`, runtime)),
+				"index.html":   []byte("ok"),
+			})
+			_, err := Open(filename, 1024)
+			if err == nil || !strings.Contains(err.Error(), "runtime key") {
+				t.Fatalf("Open() error = %v, want runtime key rejection", err)
+			}
+		})
+	}
+}
+
 func TestOpenRejectsInvalidBundles(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -139,6 +204,16 @@ func TestOpenRejectsInvalidBundles(t *testing.T) {
 			name:    "unknown manifest field",
 			files:   map[string][]byte{"app": minimalELF(), "preview.json": []byte(`{"unknown":true}`)},
 			wantErr: "unknown field",
+		},
+		{
+			name:    "runtime outside runtime mode",
+			files:   map[string][]byte{"app": minimalELF(), "preview.json": []byte(`{"runtime":"site"}`)},
+			wantErr: "only allowed",
+		},
+		{
+			name:    "runtime codex auth",
+			files:   map[string][]byte{"preview.json": []byte(`{"build":"runtime","runtime":"site","codex_auth":true}`)},
+			wantErr: "not supported",
 		},
 		{
 			name:    "reserved PORT",

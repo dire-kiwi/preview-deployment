@@ -3,7 +3,7 @@
 A small, self-hosted preview platform built from two long-running containers:
 
 - **Traefik** discovers preview containers from Docker labels and routes each deployment by hostname.
-- **Orchestrator** accepts a ZIP containing a Linux executable and owns its build, create, start, stop, logs, and delete lifecycle.
+- **Orchestrator** accepts a validated ZIP and owns its build-or-stage, create, start, stop, logs, and delete lifecycle.
 
 There is no database. Docker containers and labels are the source of truth, so previews remain visible across orchestrator upgrades and restarts.
 
@@ -104,8 +104,23 @@ preview server:
 previewctl deploy --manifest preview.json --output json .
 ```
 
+For sources that run in a reusable image already built on the preview host, use
+an explicit runtime manifest. The CLI still applies `.dockerignore`, excludes
+`.git`, and uploads exactly one ZIP, but it does not require a Dockerfile:
+
+```json
+{"build":"runtime","runtime":"wordpress-tailwind","port":8080}
+```
+
+```sh
+npm run build
+previewctl deploy --manifest preview.json --output json .
+```
+
 Open the read-only deployment dashboard at the orchestrator's root URL, such as
 `https://api.preview.example.com/`.
+The bundled Traefik rule exposes only that exact `/` path. Health and `/v1/*`
+remain on the loopback orchestrator port for SSH-forwarded automation.
 
 ## Deploy from GitHub Actions
 
@@ -165,7 +180,7 @@ app              required, at ZIP root
 preview.json     optional, at ZIP root; build omitted or "executable"
 ```
 
-`app` must be a Linux ELF executable for an architecture supported by the Docker host. It must listen on `0.0.0.0:$PORT`; the orchestrator supplies `PORT` from the manifest, defaulting to `8080`. Generated images use `debian:bookworm-slim` and install Bash plus the system CA bundle in a cached layer before copying the application. Custom runtime images must provide `apt-get` or `apk`, or already contain `/bin/bash` and `/etc/ssl/certs/ca-certificates.crt`.
+`app` must be a Linux ELF executable for an architecture supported by the Docker host. It must listen on `0.0.0.0:$PORT`; the orchestrator supplies `PORT` from the manifest, defaulting to `8080`. Generated images use `debian:bookworm-slim` and install Bash plus the system CA bundle in a cached layer before copying the application. A custom executable base selected with `RUNTIME_IMAGE` must provide `apt-get` or `apk`, or already contain `/bin/bash` and `/etc/ssl/certs/ca-certificates.crt`.
 
 The Dockerfile form contains:
 
@@ -184,6 +199,29 @@ declare Docker volumes are rejected. Dockerfile builds are for trusted code:
 build-time `RUN` instructions have network access and are not a strong
 multi-tenant sandbox.
 
+The reusable-runtime form contains:
+
+```text
+preview.json      required, with "build":"runtime" and a logical "runtime" key
+...               regular application source files and directories
+```
+
+The logical key is resolved only through the server's `PREVIEW_RUNTIMES`
+allowlist, for example
+`wordpress-tailwind=preview-runtime/wordpress-tailwind:7.0.1-v1`. Configured
+image references are restricted to the local `preview-runtime/` namespace and
+must already exist on the Docker host. The runtime image must provide an
+entrypoint that expands `/opt/preview/source.zip` into a writable location such
+as `/home/preview`.
+
+The orchestrator never pulls or builds a runtime image. It inspects the allowed
+local reference, creates the container by immutable image ID, validates and
+canonically repacks the source as one ZIP without host extraction, and bind
+mounts that exact file read-only at `/opt/preview/source.zip`. Payload files live
+under the root-only `PREVIEW_PAYLOAD_DIR` and survive orchestrator restarts;
+deleting a preview first removes its container, then its payload. Runtime images
+are shared host assets and are never deleted with a preview.
+
 Example `preview.json`:
 
 ```json
@@ -199,8 +237,10 @@ Example `preview.json`:
 }
 ```
 
-`build` may be `executable` or `dockerfile`; omitting it preserves executable
-behavior. Unknown manifest fields, a user-provided `PORT`, links, unsafe ZIP
+`build` may be `executable`, `dockerfile`, or `runtime`; omitting it preserves
+executable behavior. `runtime` is required for runtime mode and forbidden in
+the other modes. Runtime mode also rejects `codex_auth`. Unknown manifest
+fields, a user-provided `PORT`, links, unsafe ZIP
 paths, non-ELF executable files, and oversized archives are rejected.
 
 Setting `"codex_auth": true` opts that deployment into a read-only bind mount
@@ -234,7 +274,7 @@ curl --fail-with-body -H 'Content-Type: application/zip' \
 | `POST` | `/v1/deployments/{id}/stop` | Stop it |
 | `POST` | `/v1/deployments/{id}/start` | Start it again |
 | `GET` | `/v1/deployments/{id}/logs?tail=200` | Read combined logs, up to 5,000 requested lines |
-| `DELETE` | `/v1/deployments/{id}` | Remove its container and image |
+| `DELETE` | `/v1/deployments/{id}` | Remove its container and any orchestrator-owned image |
 | `GET` | `/healthz` | Check orchestrator and Docker access |
 
 Deploy success means Docker started the container; it does not guarantee that the uploaded application is ready to serve traffic.
@@ -262,16 +302,21 @@ Copy `.env.example` when running from a source checkout. Common settings are:
 - `PREVIEW_MEMORY_MB`, `PREVIEW_CPUS`, `PREVIEW_PIDS_LIMIT`, and `PREVIEW_TMPFS_MB`: per-preview limits.
 - `CODEX_AUTH_PATH`: optional absolute host path mounted read-only only for
   manifests that explicitly request `codex_auth`.
+- `PREVIEW_PAYLOAD_DIR`: absolute root-only host directory mounted at the same
+  path in the orchestrator; the installer defaults it to `INSTALL_DIR/payloads`.
+- `PREVIEW_RUNTIMES`: comma-separated logical runtime keys mapped to trusted
+  local `preview-runtime/` image references.
 - `PREVIEW_DEPLOYMENT_VERSION`: orchestrator image tag used by Compose.
 
 ## Runtime isolation and security boundary
 
-Generated and Dockerfile-built preview containers run as UID/GID `65534`, with
-a read-only root filesystem, a no-exec ephemeral `/tmp`, an executable ephemeral
-`/home/preview` workspace, all Linux capabilities dropped,
+Generated, Dockerfile-built, and reusable-runtime preview containers run as
+UID/GID `65534`, with a read-only root filesystem, a no-exec ephemeral `/tmp`,
+an executable ephemeral `/home/preview` workspace, all Linux capabilities dropped,
 `no-new-privileges`, no host ports, and CPU, memory, PID, log-size, and
-deployment-count limits. Dockerfile images retain their entrypoint and working
-directory but cannot declare volumes. The only supported host mount is the
-explicit read-only Codex auth opt-in described above.
+deployment-count limits. Dockerfile and runtime images retain their entrypoint
+and working directory but cannot declare volumes. Runtime payloads use the
+managed read-only file bind described above; the only user-selectable host mount
+is the explicit read-only Codex auth opt-in described above.
 
 The platform still executes uploaded code. The orchestrator's Docker socket access is effectively host-root access even though the socket mount is read-only. Before allowing untrusted users or remote traffic, use a dedicated host or isolated Docker daemon, terminate TLS, set `API_TOKEN`, restrict egress, protect the Traefik dashboard, and consider a tightly scoped Docker socket proxy. Preview filesystems are ephemeral; application data and volumes are not persisted.

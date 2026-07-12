@@ -155,13 +155,14 @@ func (a *app) parseGlobal(args []string) (globalOptions, []string, error) {
 func (a *app) runDeploy(ctx context.Context, client *Client, args []string) error {
 	const usage = `Usage: previewctl [global flags] deploy [--manifest FILE] [--output text|json] SOURCE
 
-SOURCE may be an existing deployment ZIP, an executable, or a Docker build
-context directory. Executables are packaged as root-level app. Directories
-must contain a root Dockerfile and are packaged into one ZIP. An optional
+SOURCE may be an existing deployment ZIP, an executable, or a directory.
+Executables are packaged as root-level app. Directories are packaged into one
+ZIP after .dockerignore and .git exclusions; Dockerfile mode requires a root
+Dockerfile, while an explicit runtime manifest does not. An optional
 preview.json manifest may be supplied with either generated ZIP form.
 `
 	flags := newCommandFlags("deploy")
-	manifest := flags.String("manifest", "", "preview.json to package with an executable")
+	manifest := flags.String("manifest", "", "preview.json to package with an executable or directory")
 	output := flags.String("output", "text", "output format: text or json")
 	if err := parseCommandFlags(flags, args, usage); err != nil {
 		return err
@@ -559,13 +560,13 @@ Usage:
   previewctl [global flags] COMMAND [command flags]
 
 Commands:
-  deploy    Upload a ZIP or package an executable or Docker context
+  deploy    Upload a ZIP or package an executable or source directory
   list      List deployments
   get       Show one deployment
   logs      Read deployment logs
   start     Start a stopped deployment
   stop      Stop a deployment
-  delete    Delete a deployment and its image
+  delete    Delete a deployment and any orchestrator-owned image
   health    Check orchestrator health
   version   Print build information and optionally check for updates
   update    Check for or install the latest previewctl release

@@ -29,6 +29,7 @@ import (
 const (
 	maxErrorBody              = 1024 * 1024
 	codexAuthSecretPath       = "/run/secrets/codex-auth.json"
+	runtimeSourcePath         = "/opt/preview/source.zip"
 	previewEntrypointPath     = "/app/preview-entrypoint"
 	previewEntrypointFilename = "preview-entrypoint"
 	previewEntrypoint         = `#!/bin/bash
@@ -364,6 +365,7 @@ type CreateOptions struct {
 	TmpfsBytes    int64
 	RestartPolicy string
 	CodexAuthPath string
+	PayloadPath   string
 }
 
 // CreateContainer creates, but does not start, a preview container.
@@ -427,6 +429,14 @@ func (c *Client) CreateContainer(ctx context.Context, options CreateOptions) (st
 			Target   string `json:"Target"`
 			ReadOnly bool   `json:"ReadOnly"`
 		}{Type: "bind", Source: options.CodexAuthPath, Target: codexAuthSecretPath, ReadOnly: true})
+	}
+	if options.PayloadPath != "" {
+		requestBody.HostConfig.Mounts = append(requestBody.HostConfig.Mounts, struct {
+			Type     string `json:"Type"`
+			Source   string `json:"Source"`
+			Target   string `json:"Target"`
+			ReadOnly bool   `json:"ReadOnly"`
+		}{Type: "bind", Source: options.PayloadPath, Target: runtimeSourcePath, ReadOnly: true})
 	}
 	requestBody.HostConfig.RestartPolicy.Name = options.RestartPolicy
 	requestBody.HostConfig.LogConfig.Type = "json-file"
@@ -495,6 +505,7 @@ type ContainerDetails struct {
 // ImageDetails is the subset of image metadata used to enforce the runtime
 // filesystem policy before a container is created.
 type ImageDetails struct {
+	ID     string `json:"Id"`
 	Config struct {
 		Volumes map[string]struct{} `json:"Volumes"`
 	} `json:"Config"`

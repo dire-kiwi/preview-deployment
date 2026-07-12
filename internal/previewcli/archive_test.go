@@ -71,6 +71,43 @@ func TestPrepareArchiveExplicitManifestOverridesContextManifest(t *testing.T) {
 	}
 }
 
+func TestPrepareArchivePackagesRuntimeDirectoryWithoutDockerfile(t *testing.T) {
+	source := t.TempDir()
+	writeTestFile(t, filepath.Join(source, ".dockerignore"), 0o644, "dist/cache.txt\nnode_modules\n")
+	writeTestFile(t, filepath.Join(source, "dist", "index.css"), 0o644, "body{}\n")
+	writeTestFile(t, filepath.Join(source, "dist", "cache.txt"), 0o644, "ignored\n")
+	writeTestFile(t, filepath.Join(source, ".git", "config"), 0o644, "secret\n")
+	if err := os.MkdirAll(filepath.Join(source, "node_modules", ".bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../package/cli.js", filepath.Join(source, "node_modules", ".bin", "cli")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	manifest := filepath.Join(t.TempDir(), "runtime.json")
+	writeTestFile(t, manifest, 0o644, `{"build":"runtime","runtime":"wordpress-tailwind","name":"runtime preview"}`)
+
+	archivePath, cleanup, err := prepareArchive(source, manifest)
+	if err != nil {
+		t.Fatalf("prepareArchive() error = %v", err)
+	}
+	defer cleanup()
+	entries := readTestZIP(t, archivePath)
+	for _, name := range []string{".dockerignore", "dist/index.css", "preview.json"} {
+		if entries[name] == nil {
+			t.Errorf("archive is missing %q", name)
+		}
+	}
+	for name := range entries {
+		if name == "dist/cache.txt" || strings.HasPrefix(name, "node_modules/") || strings.HasPrefix(name, ".git/") {
+			t.Errorf("archive unexpectedly contains ignored entry %q", name)
+		}
+	}
+	manifestValue := readTestZIPJSON(t, entries["preview.json"])
+	if manifestValue["build"] != "runtime" || manifestValue["runtime"] != "wordpress-tailwind" {
+		t.Fatalf("manifest = %#v", manifestValue)
+	}
+}
+
 func TestPrepareArchiveSkipsIgnoredSymlinks(t *testing.T) {
 	contextDirectory := t.TempDir()
 	writeTestFile(t, filepath.Join(contextDirectory, "Dockerfile"), 0o644, "FROM scratch\n")

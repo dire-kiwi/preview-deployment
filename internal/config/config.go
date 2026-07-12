@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ type Config struct {
 	RuntimeImage      string
 	TraefikEntrypoint string
 	CodexAuthPath     string
+	PayloadDir        string
+	PreviewRuntimes   map[string]string
 
 	MaxUploadBytes   int64
 	MaxBinaryBytes   int64
@@ -50,6 +53,7 @@ func Load() (Config, error) {
 		RuntimeImage:      envOr("RUNTIME_IMAGE", "debian:bookworm-slim"),
 		TraefikEntrypoint: envOr("TRAEFIK_ENTRYPOINT", "web"),
 		CodexAuthPath:     strings.TrimSpace(envOr("CODEX_AUTH_PATH", "")),
+		PayloadDir:        strings.TrimSpace(envOr("PAYLOAD_DIR", "/var/lib/preview-deployment/payloads")),
 		DeployTimeout:     10 * time.Minute,
 		StopTimeout:       10 * time.Second,
 	}
@@ -128,8 +132,43 @@ func Load() (Config, error) {
 	if cfg.CodexAuthPath != "" && !strings.HasPrefix(cfg.CodexAuthPath, "/") {
 		return Config{}, fmt.Errorf("CODEX_AUTH_PATH must be an absolute host path")
 	}
+	if !filepath.IsAbs(cfg.PayloadDir) || filepath.Clean(cfg.PayloadDir) != cfg.PayloadDir || cfg.PayloadDir == string(filepath.Separator) {
+		return Config{}, fmt.Errorf("PAYLOAD_DIR must be a clean absolute directory path other than the filesystem root")
+	}
+	if cfg.PreviewRuntimes, err = parsePreviewRuntimes(envOr("PREVIEW_RUNTIMES", "")); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
+}
+
+var (
+	runtimeKeyPattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
+	runtimeRefPattern = regexp.MustCompile(`^preview-runtime/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$`)
+)
+
+func parsePreviewRuntimes(value string) (map[string]string, error) {
+	runtimes := make(map[string]string)
+	if strings.TrimSpace(value) == "" {
+		return runtimes, nil
+	}
+	for _, mapping := range strings.Split(value, ",") {
+		key, image, found := strings.Cut(mapping, "=")
+		if !found || len(key) > 64 || !runtimeKeyPattern.MatchString(key) {
+			return nil, fmt.Errorf("PREVIEW_RUNTIMES entries must use lowercase-key=preview-runtime/image[:tag]")
+		}
+		if !runtimeRefPattern.MatchString(image) {
+			return nil, fmt.Errorf("PREVIEW_RUNTIMES image for %q must be a local reference under preview-runtime/", key)
+		}
+		if _, duplicate := runtimes[key]; duplicate {
+			return nil, fmt.Errorf("PREVIEW_RUNTIMES contains duplicate key %q", key)
+		}
+		runtimes[key] = image
+		if len(runtimes) > 32 {
+			return nil, fmt.Errorf("PREVIEW_RUNTIMES may define at most 32 runtimes")
+		}
+	}
+	return runtimes, nil
 }
 
 func envOr(key, fallback string) string {

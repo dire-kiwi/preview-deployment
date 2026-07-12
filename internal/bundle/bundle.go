@@ -18,10 +18,13 @@ import (
 )
 
 const (
-	maxEntries      = 256
-	maxManifestSize = 64 * 1024
-	maxArgs         = 64
-	maxEnvVars      = 128
+	maxEntries        = 256
+	maxManifestSize   = 64 * 1024
+	maxArgs           = 64
+	maxEnvVars        = 128
+	maxPathBytes      = 1024
+	maxPathDepth      = 32
+	maxComponentBytes = 255
 )
 
 var ErrInvalid = errors.New("invalid deployment archive")
@@ -34,6 +37,7 @@ type Manifest struct {
 	Env       map[string]string `json:"env,omitempty"`
 	CodexAuth bool              `json:"codex_auth,omitempty"`
 	Build     string            `json:"build,omitempty"`
+	Runtime   string            `json:"runtime,omitempty"`
 }
 
 // BuildMode identifies how the uploaded archive is turned into an image.
@@ -45,11 +49,14 @@ const (
 	// BuildDockerfile builds the root-level Dockerfile with the uploaded files as
 	// its context.
 	BuildDockerfile
+	// BuildRuntime runs a server-configured local runtime image with a canonical,
+	// validated source ZIP bind-mounted read-only at /opt/preview/source.zip.
+	BuildRuntime
 )
 
-// ContextFile is one validated entry in an uploaded Docker build context.
-// Names are canonical relative POSIX paths and modes contain only safe
-// permission bits.
+// ContextFile is one validated entry in an uploaded Docker build context or
+// reusable-runtime payload. Names are canonical relative POSIX paths and modes
+// contain only safe permission bits.
 type ContextFile struct {
 	Name      string
 	Mode      int64
@@ -74,7 +81,9 @@ type archiveEntry struct {
 // Open reads a ZIP from filename. By default the archive must contain a
 // root-level Linux ELF executable named app. A preview.json with
 // "build":"dockerfile" instead requires a root-level Dockerfile and treats
-// every other regular entry except preview.json as its build context.
+// every other regular entry except preview.json as its build context. A
+// "build":"runtime" archive is fully validated into canonical source entries
+// that are later repacked without extracting onto the host.
 func Open(filename string, maxBinaryBytes int64) (Bundle, error) {
 	reader, err := zip.OpenReader(filename)
 	if err != nil {
@@ -176,11 +185,49 @@ func Open(filename string, maxBinaryBytes int64) (Bundle, error) {
 		}
 		return Bundle{Context: contextFiles, BuildMode: BuildDockerfile, Manifest: manifest}, nil
 
+	case "runtime":
+		contextFiles, contextErr := readRuntimeContext(entries, maxBinaryBytes)
+		if contextErr != nil {
+			return Bundle{}, contextErr
+		}
+		return Bundle{Context: contextFiles, BuildMode: BuildRuntime, Manifest: manifest}, nil
+
 	default:
 		// validateManifest rejects this, but keep the switch exhaustive if its
 		// validation changes independently later.
 		return Bundle{}, invalidf("unsupported preview.json build mode %q", manifest.Build)
 	}
+}
+
+func readRuntimeContext(entries []archiveEntry, limit int64) ([]ContextFile, error) {
+	remaining := limit
+	contextFiles := make([]ContextFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.directory {
+			if entry.file.UncompressedSize64 != 0 {
+				return nil, invalidf("runtime source directory %q contains data", entry.name)
+			}
+			contextFiles = append(contextFiles, ContextFile{Name: entry.name, Mode: 0o755, Directory: true})
+			continue
+		}
+		if remaining < 0 || entry.file.UncompressedSize64 > uint64(remaining) {
+			return nil, invalidf("runtime source exceeds the %d-byte aggregate uncompressed limit", limit)
+		}
+		contents, err := readZipFile(entry.file, remaining)
+		if err != nil {
+			return nil, invalidf("cannot read runtime source file %q: %v", entry.name, err)
+		}
+		remaining -= int64(len(contents))
+		if entry.name == "preview.json" {
+			continue
+		}
+		mode := int64(0o644)
+		if entry.file.Mode().Perm()&0o111 != 0 {
+			mode = 0o755
+		}
+		contextFiles = append(contextFiles, ContextFile{Name: entry.name, Mode: mode, Contents: contents})
+	}
+	return contextFiles, nil
 }
 
 func safeName(name string) (string, error) {
@@ -191,6 +238,15 @@ func safeName(name string) (string, error) {
 	clean := path.Clean(canonical)
 	if canonical == "" || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean != canonical {
 		return "", invalidf("unsafe archive path %q", name)
+	}
+	components := strings.Split(canonical, "/")
+	if len(canonical) > maxPathBytes || len(components) > maxPathDepth {
+		return "", invalidf("archive path exceeds the %d-byte or %d-component limit", maxPathBytes, maxPathDepth)
+	}
+	for _, component := range components {
+		if len(component) > maxComponentBytes {
+			return "", invalidf("archive path component exceeds the %d-byte limit", maxComponentBytes)
+		}
 	}
 	return clean, nil
 }
@@ -260,11 +316,24 @@ func validateELF(app []byte) error {
 	return nil
 }
 
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var (
+	envName    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	runtimeKey = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
+)
 
 func validateManifest(manifest Manifest) error {
-	if manifest.Build != "" && manifest.Build != "executable" && manifest.Build != "dockerfile" {
-		return invalidf(`preview.json build must be "executable" or "dockerfile"`)
+	if manifest.Build != "" && manifest.Build != "executable" && manifest.Build != "dockerfile" && manifest.Build != "runtime" {
+		return invalidf(`preview.json build must be "executable", "dockerfile", or "runtime"`)
+	}
+	if manifest.Build == "runtime" {
+		if len(manifest.Runtime) > 64 || !runtimeKey.MatchString(manifest.Runtime) {
+			return invalidf(`preview.json runtime must be a configured lowercase runtime key of at most 64 characters`)
+		}
+		if manifest.CodexAuth {
+			return invalidf(`preview.json codex_auth is not supported for runtime builds`)
+		}
+	} else if manifest.Runtime != "" {
+		return invalidf(`preview.json runtime is only allowed when build is "runtime"`)
 	}
 	if manifest.Port < 1 || manifest.Port > 65535 {
 		return invalidf("preview.json port must be between 1 and 65535")

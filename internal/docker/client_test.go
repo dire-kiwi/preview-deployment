@@ -313,6 +313,54 @@ func TestCreateContainerOmitsUnsetWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestCreateContainerBindMountsRuntimePayloadReadOnly(t *testing.T) {
+	var mounts []struct {
+		Type     string `json:"Type"`
+		Source   string `json:"Source"`
+		Target   string `json:"Target"`
+		ReadOnly bool   `json:"ReadOnly"`
+	}
+	client := &Client{
+		apiVersion: "1.44",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var requestBody struct {
+				HostConfig struct {
+					Mounts []struct {
+						Type     string `json:"Type"`
+						Source   string `json:"Source"`
+						Target   string `json:"Target"`
+						ReadOnly bool   `json:"ReadOnly"`
+					} `json:"Mounts"`
+				} `json:"HostConfig"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				return nil, err
+			}
+			mounts = requestBody.HostConfig.Mounts
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"Id":"container-id"}`)),
+				Request:    request,
+			}, nil
+		})},
+	}
+	_, err := client.CreateContainer(context.Background(), CreateOptions{
+		Name: "preview-test", Image: "sha256:runtime", Port: 8080, Network: "preview-network", TmpfsBytes: 64 << 20,
+		PayloadPath: "/srv/preview/payloads/abc123abc123.zip",
+	})
+	if err != nil {
+		t.Fatalf("CreateContainer() error = %v", err)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("mounts = %#v, want one payload mount", mounts)
+	}
+	mount := mounts[0]
+	if mount.Type != "bind" || mount.Source != "/srv/preview/payloads/abc123abc123.zip" || mount.Target != "/opt/preview/source.zip" || !mount.ReadOnly {
+		t.Fatalf("payload mount = %#v", mount)
+	}
+}
+
 func TestInspectImageReadsDeclaredVolumes(t *testing.T) {
 	client := &Client{
 		apiVersion: "1.44",
@@ -323,7 +371,7 @@ func TestInspectImageReadsDeclaredVolumes(t *testing.T) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"Config":{"Volumes":{"/var/lib/mysql":{}}}}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"Id":"sha256:immutable","Config":{"Volumes":{"/var/lib/mysql":{}}}}`)),
 				Request:    request,
 			}, nil
 		})},
@@ -334,6 +382,9 @@ func TestInspectImageReadsDeclaredVolumes(t *testing.T) {
 	}
 	if _, ok := details.Config.Volumes["/var/lib/mysql"]; !ok {
 		t.Fatalf("volumes = %#v", details.Config.Volumes)
+	}
+	if details.ID != "sha256:immutable" {
+		t.Fatalf("image ID = %q", details.ID)
 	}
 }
 

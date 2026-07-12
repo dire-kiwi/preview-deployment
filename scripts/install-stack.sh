@@ -59,6 +59,8 @@ Environment:
   PREVIEW_DEPLOYMENT_INSTALL_DIR  Same as --install-dir.
   PREVIEW_DEPLOYMENT_ENV_FILE     Same as --env-file.
   PREVIEW_DEPLOYMENT_REPOSITORY   Same as --repository.
+  PREVIEW_PAYLOAD_DIR             Absolute host payload directory (default:
+                                  INSTALL_DIR/payloads).
 
 An existing .env is never replaced. The selected release tag is exported only
 for the pull/up operation and recorded in INSTALL_DIR/VERSION.
@@ -253,6 +255,29 @@ atomic_copy() {
     ATOMIC_TMP=
 }
 
+persist_payload_directory() {
+    payload_value=$1
+    env_directory=$(dirname "$ENV_FILE")
+    ATOMIC_TMP=$(mktemp "$env_directory/.preview-env.XXXXXX") || die "cannot write to $env_directory"
+    awk -v value="$payload_value" '
+        BEGIN { written = 0 }
+        /^PREVIEW_PAYLOAD_DIR=/ {
+            if (!written) {
+                print "PREVIEW_PAYLOAD_DIR=" value
+                written = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!written) print "PREVIEW_PAYLOAD_DIR=" value
+        }
+    ' "$ENV_FILE" > "$ATOMIC_TMP"
+    chmod 0600 "$ATOMIC_TMP"
+    mv -f "$ATOMIC_TMP" "$ENV_FILE"
+    ATOMIC_TMP=
+}
+
 run_compose() {
     compose_file=$1
     shift
@@ -307,9 +332,51 @@ else
     say "Preserving existing environment file $ENV_FILE"
 fi
 
+env_payload_directory=$(awk -F= '$1 == "PREVIEW_PAYLOAD_DIR" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")
+if [ -n "${PREVIEW_PAYLOAD_DIR:-}" ]; then
+    selected_payload_directory=$PREVIEW_PAYLOAD_DIR
+elif [ -n "$env_payload_directory" ]; then
+    selected_payload_directory=$env_payload_directory
+else
+    case "$INSTALL_DIR" in
+        /*) absolute_install_directory=$INSTALL_DIR ;;
+        *) absolute_install_directory=$(cd "$INSTALL_DIR" && pwd) ;;
+    esac
+    selected_payload_directory=$absolute_install_directory/payloads
+fi
+case "$selected_payload_directory" in
+    /*) ;;
+    *) die "PREVIEW_PAYLOAD_DIR must be an absolute path" ;;
+esac
+case "$selected_payload_directory" in
+    /|*//*|*/|*'/../'*|*'/./'*|*/..|*/.) die "PREVIEW_PAYLOAD_DIR must be a clean absolute path other than /" ;;
+esac
+if [ -L "$selected_payload_directory" ]; then
+    die "PREVIEW_PAYLOAD_DIR must not be a symbolic link"
+fi
+if [ -e "$selected_payload_directory" ] && [ ! -d "$selected_payload_directory" ]; then
+    die "PREVIEW_PAYLOAD_DIR exists but is not a directory"
+fi
+PREVIEW_PAYLOAD_DIR=$selected_payload_directory
+export PREVIEW_PAYLOAD_DIR
+if [ -z "$env_payload_directory" ]; then
+    persist_payload_directory "$PREVIEW_PAYLOAD_DIR"
+fi
+
 run_compose "$COMPOSE_TMP" config --quiet
 say "Pulling release images..."
 run_compose "$COMPOSE_TMP" pull
+
+say "Preparing the root-only runtime payload directory..."
+docker run \
+    --rm \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --volume "$PREVIEW_PAYLOAD_DIR:/payloads" \
+    alpine:3.21 \
+    sh -c '[ "$(stat -c %u /payloads)" = 0 ] || { echo "payload directory must be owned by root" >&2; exit 1; }; chmod 0700 /payloads'
+[ -d "$PREVIEW_PAYLOAD_DIR" ] || die "Docker did not create PREVIEW_PAYLOAD_DIR"
 
 PREVIOUS_COMPOSE=$TMP_DIR/previous-compose.yaml
 PREVIOUS_VERSION=$TMP_DIR/previous-version

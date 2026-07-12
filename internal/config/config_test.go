@@ -51,3 +51,53 @@ func TestLoadReadsAbsoluteCodexAuthPath(t *testing.T) {
 		t.Fatal("Load accepted a relative CODEX_AUTH_PATH")
 	}
 }
+
+func TestLoadValidatesPayloadDirectory(t *testing.T) {
+	t.Setenv("PAYLOAD_DIR", "/srv/preview/payloads")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PayloadDir != "/srv/preview/payloads" {
+		t.Fatalf("PayloadDir = %q", cfg.PayloadDir)
+	}
+
+	for _, path := range []string{"relative/payloads", "/", "/srv/preview/../payloads"} {
+		t.Run(path, func(t *testing.T) {
+			t.Setenv("PAYLOAD_DIR", path)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() accepted unsafe PAYLOAD_DIR %q", path)
+			}
+		})
+	}
+}
+
+func TestLoadParsesConfiguredPreviewRuntimes(t *testing.T) {
+	t.Setenv("PREVIEW_RUNTIMES", "wordpress-tailwind=preview-runtime/wordpress-tailwind:7.0.1-v1,node=preview-runtime/node:24")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.PreviewRuntimes["wordpress-tailwind"]; got != "preview-runtime/wordpress-tailwind:7.0.1-v1" {
+		t.Fatalf("wordpress runtime = %q", got)
+	}
+	if got := cfg.PreviewRuntimes["node"]; got != "preview-runtime/node:24" {
+		t.Fatalf("node runtime = %q", got)
+	}
+}
+
+func TestLoadRejectsUnsafePreviewRuntimes(t *testing.T) {
+	for _, value := range []string{
+		"UPPER=preview-runtime/site:latest",
+		"site=ghcr.io/example/site:latest",
+		"site=preview-runtime/site:one,site=preview-runtime/site:two",
+		"site",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("PREVIEW_RUNTIMES", value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() accepted PREVIEW_RUNTIMES=%q", value)
+			}
+		})
+	}
+}

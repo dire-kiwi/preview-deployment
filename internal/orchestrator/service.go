@@ -20,14 +20,17 @@ import (
 )
 
 const (
-	managedLabel   = "com.preview-deployment.managed"
-	idLabel        = "com.preview-deployment.id"
-	createdLabel   = "com.preview-deployment.created-at"
-	portLabel      = "com.preview-deployment.port"
-	imageLabel     = "com.preview-deployment.image"
-	nameLabel      = "com.preview-deployment.name"
-	managedValue   = "true"
-	imageNamespace = "preview-deployment"
+	managedLabel     = "com.preview-deployment.managed"
+	idLabel          = "com.preview-deployment.id"
+	createdLabel     = "com.preview-deployment.created-at"
+	portLabel        = "com.preview-deployment.port"
+	imageLabel       = "com.preview-deployment.image"
+	imageOwnedLabel  = "com.preview-deployment.image-owned"
+	payloadLabel     = "com.preview-deployment.payload"
+	payloadHashLabel = "com.preview-deployment.payload-sha256"
+	nameLabel        = "com.preview-deployment.name"
+	managedValue     = "true"
+	imageNamespace   = "preview-deployment"
 )
 
 var (
@@ -55,7 +58,7 @@ type Deployment struct {
 
 // Service coordinates builds and lifecycle operations with Docker.
 type Service struct {
-	docker   *docker.Client
+	docker   dockerClient
 	config   config.Config
 	logger   *slog.Logger
 	buildSem chan struct{}
@@ -64,17 +67,38 @@ type Service struct {
 	reserved   int
 }
 
-func New(dockerClient *docker.Client, cfg config.Config, logger *slog.Logger) *Service {
+type dockerClient interface {
+	BuildImage(context.Context, string, string, string, []byte) error
+	BuildContextImage(context.Context, string, []bundle.ContextFile) error
+	InspectImage(context.Context, string) (docker.ImageDetails, error)
+	CreateContainer(context.Context, docker.CreateOptions) (string, error)
+	StartContainer(context.Context, string) error
+	StopContainer(context.Context, string, time.Duration) error
+	RemoveContainer(context.Context, string) error
+	RemoveImage(context.Context, string) error
+	InspectContainer(context.Context, string) (docker.ContainerDetails, error)
+	ListContainers(context.Context, map[string]string) ([]docker.ContainerSummary, error)
+	ContainerLogs(context.Context, string, int, int64) ([]byte, bool, error)
+}
+
+func New(dockerClient *docker.Client, cfg config.Config, logger *slog.Logger) (*Service, error) {
+	if err := validatePayloadDirectory(cfg.PayloadDir); err != nil {
+		return nil, err
+	}
 	return &Service{
 		docker:   dockerClient,
 		config:   cfg,
 		logger:   logger,
 		buildSem: make(chan struct{}, cfg.BuildConcurrency),
-	}
+	}, nil
 }
 
-// Deploy builds an image, creates a sandboxed container, and starts it.
+// Deploy builds or selects an image, atomically publishes any runtime payload,
+// creates a sandboxed container with the required read-only bind, and starts it.
 func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (Deployment, error) {
+	if deploymentBundle.BuildMode == bundle.BuildRuntime && deploymentBundle.Manifest.CodexAuth {
+		return Deployment{}, errors.New("runtime deployments do not support codex_auth")
+	}
 	if deploymentBundle.Manifest.CodexAuth && s.config.CodexAuthPath == "" {
 		return Deployment{}, errors.New("deployment requests codex_auth but CODEX_AUTH_PATH is not configured")
 	}
@@ -83,11 +107,16 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	}
 	defer s.releaseCapacity()
 
-	select {
-	case s.buildSem <- struct{}{}:
-		defer func() { <-s.buildSem }()
-	case <-ctx.Done():
-		return Deployment{}, ctx.Err()
+	switch deploymentBundle.BuildMode {
+	case bundle.BuildExecutable, bundle.BuildDockerfile:
+		if err := s.acquireBuildSlot(ctx); err != nil {
+			return Deployment{}, err
+		}
+		defer s.releaseBuildSlot()
+	case bundle.BuildRuntime:
+		// Runtime deployments do not consume build capacity.
+	default:
+		return Deployment{}, errors.New("deployment has an unsupported build mode")
 	}
 
 	deployCtx, cancel := context.WithTimeout(ctx, s.config.DeployTimeout)
@@ -97,30 +126,51 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	if err != nil {
 		return Deployment{}, fmt.Errorf("generate deployment ID: %w", err)
 	}
-	image := imageNamespace + "/" + id + ":latest"
+	image := ""
+	containerImage := ""
+	imageOwned := true
 	containerName := "preview-" + id
 	createdAt := time.Now().UTC()
 
-	s.logger.Info("building preview image", "deployment_id", id, "image", image, "build_mode", deploymentBundle.Manifest.Build)
 	switch deploymentBundle.BuildMode {
 	case bundle.BuildExecutable:
+		image = imageNamespace + "/" + id + ":latest"
+		s.logger.Info("building preview image", "deployment_id", id, "image", image, "build_mode", deploymentBundle.Manifest.Build)
 		err = s.docker.BuildImage(deployCtx, image, s.config.RuntimeImage, id, deploymentBundle.App)
 	case bundle.BuildDockerfile:
+		image = imageNamespace + "/" + id + ":latest"
+		s.logger.Info("building preview image", "deployment_id", id, "image", image, "build_mode", deploymentBundle.Manifest.Build)
 		err = s.docker.BuildContextImage(deployCtx, image, deploymentBundle.Context)
-	default:
-		err = errors.New("deployment has an unsupported build mode")
+	case bundle.BuildRuntime:
+		var configured bool
+		image, configured = s.config.PreviewRuntimes[deploymentBundle.Manifest.Runtime]
+		if !configured {
+			return Deployment{}, fmt.Errorf("runtime %q is not configured on this preview host", deploymentBundle.Manifest.Runtime)
+		}
+		imageOwned = false
+		s.logger.Info("using configured local preview runtime", "deployment_id", id, "runtime", deploymentBundle.Manifest.Runtime, "image", image)
 	}
 	if err != nil {
 		return Deployment{}, err
 	}
-	imageCreated := true
+	imageCreated := imageOwned
 	containerID := ""
+	payloadPath := ""
+	payloadHash := ""
+	payloadCreated := false
 	cleanup := func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cleanupCancel()
+		containerGone := true
 		if containerID != "" {
 			if removeErr := s.docker.RemoveContainer(cleanupCtx, containerID); removeErr != nil && !docker.IsNotFound(removeErr) {
+				containerGone = false
 				s.logger.Warn("could not clean up failed deployment container", "deployment_id", id, "error", removeErr)
+			}
+		}
+		if payloadCreated && containerGone {
+			if removeErr := removePayload(s.config.PayloadDir, id); removeErr != nil {
+				s.logger.Warn("could not clean up failed deployment payload", "deployment_id", id, "error", removeErr)
 			}
 		}
 		if imageCreated {
@@ -132,17 +182,34 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	imageDetails, err := s.docker.InspectImage(deployCtx, image)
 	if err != nil {
 		cleanup()
+		if deploymentBundle.BuildMode == bundle.BuildRuntime && docker.IsNotFound(err) {
+			return Deployment{}, fmt.Errorf("local runtime image %q was not found; provision it on the preview host before deploying", image)
+		}
 		return Deployment{}, err
 	}
 	if err := validateImagePolicy(imageDetails); err != nil {
 		cleanup()
 		return Deployment{}, err
 	}
+	containerImage = image
+	if deploymentBundle.BuildMode == bundle.BuildRuntime {
+		if !validImmutableImageID(imageDetails.ID) {
+			cleanup()
+			return Deployment{}, fmt.Errorf("configured runtime %q resolved to an invalid immutable image ID", deploymentBundle.Manifest.Runtime)
+		}
+		containerImage = imageDetails.ID
+		payloadPath, payloadHash, err = writePayloadAtomically(s.config.PayloadDir, id, deploymentBundle.Context)
+		if err != nil {
+			cleanup()
+			return Deployment{}, err
+		}
+		payloadCreated = true
+	}
 
-	labels := s.labels(id, image, deploymentBundle.Manifest, createdAt)
+	labels := s.labels(id, image, imageOwned, payloadHash, deploymentBundle.Manifest, createdAt)
 	containerID, err = s.docker.CreateContainer(deployCtx, docker.CreateOptions{
 		Name:          containerName,
-		Image:         image,
+		Image:         containerImage,
 		WorkingDir:    workingDirectory(deploymentBundle.BuildMode),
 		Args:          append([]string(nil), deploymentBundle.Manifest.Args...),
 		Env:           environment(deploymentBundle.Manifest),
@@ -160,6 +227,7 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 			}
 			return ""
 		}(),
+		PayloadPath: payloadPath,
 	})
 	if err != nil {
 		cleanup()
@@ -171,6 +239,7 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	}
 
 	imageCreated = false
+	payloadCreated = false
 	details, err := s.docker.InspectContainer(deployCtx, containerID)
 	if err != nil {
 		// The container was successfully started. Return a useful representation
@@ -191,6 +260,19 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	deployment := s.fromDetails(details)
 	s.logger.Info("preview deployment started", "deployment_id", id, "container_id", shortID(containerID), "url", deployment.URL)
 	return deployment, nil
+}
+
+func (s *Service) acquireBuildSlot(ctx context.Context) error {
+	select {
+	case s.buildSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) releaseBuildSlot() {
+	<-s.buildSem
 }
 
 // List returns every container managed by this orchestrator, including stopped
@@ -257,10 +339,16 @@ func (s *Service) Stop(ctx context.Context, id string) (Deployment, error) {
 	return s.fromDetails(details), nil
 }
 
-// Delete stops and removes the container, then removes its generated image.
+// Delete stops and removes the container, then removes its orchestrator-owned
+// generated image. Shared local runtime images are never removed.
 func (s *Service) Delete(ctx context.Context, id string) error {
 	container, err := s.find(ctx, id)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) && validID(id) {
+			if removeErr := removePayload(s.config.PayloadDir, id); removeErr != nil {
+				return removeErr
+			}
+		}
 		return err
 	}
 	image := container.Labels[imageLabel]
@@ -273,7 +361,13 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if err := s.docker.RemoveContainer(ctx, container.ID); err != nil && !docker.IsNotFound(err) {
 		return err
 	}
-	if image != "" {
+	imageOwned := container.Labels[imageOwnedLabel] != "false"
+	if container.Labels[payloadLabel] == id+".zip" {
+		if err := removePayload(s.config.PayloadDir, id); err != nil {
+			return err
+		}
+	}
+	if image != "" && imageOwned {
 		if err := s.docker.RemoveImage(ctx, image); err != nil && !docker.IsNotFound(err) {
 			// The deployment itself is gone; image cleanup failure should not make a
 			// retry misleadingly return 404. Log the leak for operator cleanup.
@@ -329,15 +423,16 @@ func (s *Service) find(ctx context.Context, id string) (docker.ContainerSummary,
 	return containers[0], nil
 }
 
-func (s *Service) labels(id, image string, manifest bundle.Manifest, createdAt time.Time) map[string]string {
+func (s *Service) labels(id, image string, imageOwned bool, payloadHash string, manifest bundle.Manifest, createdAt time.Time) map[string]string {
 	router := "preview-" + id
 	labels := map[string]string{
-		managedLabel: managedValue,
-		idLabel:      id,
-		createdLabel: createdAt.Format(time.RFC3339Nano),
-		portLabel:    strconv.Itoa(manifest.Port),
-		imageLabel:   image,
-		nameLabel:    manifest.Name,
+		managedLabel:    managedValue,
+		idLabel:         id,
+		createdLabel:    createdAt.Format(time.RFC3339Nano),
+		portLabel:       strconv.Itoa(manifest.Port),
+		imageLabel:      image,
+		imageOwnedLabel: strconv.FormatBool(imageOwned),
+		nameLabel:       manifest.Name,
 
 		"traefik.enable":                                                "true",
 		"traefik.docker.network":                                        s.config.DockerNetwork,
@@ -346,10 +441,22 @@ func (s *Service) labels(id, image string, manifest bundle.Manifest, createdAt t
 		"traefik.http.routers." + router + ".service":                   router,
 		"traefik.http.services." + router + ".loadbalancer.server.port": strconv.Itoa(manifest.Port),
 	}
+	if payloadHash != "" {
+		labels[payloadLabel] = id + ".zip"
+		labels[payloadHashLabel] = payloadHash
+	}
 	if s.config.PublicScheme == "https" {
 		labels["traefik.http.routers."+router+".tls"] = "true"
 	}
 	return labels
+}
+
+func validImmutableImageID(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil
 }
 
 func environment(manifest bundle.Manifest) []string {
@@ -367,10 +474,10 @@ func environment(manifest bundle.Manifest) []string {
 }
 
 func workingDirectory(mode bundle.BuildMode) string {
-	if mode == bundle.BuildDockerfile {
-		return ""
+	if mode == bundle.BuildExecutable {
+		return "/app"
 	}
-	return "/app"
+	return ""
 }
 
 func validateImagePolicy(details docker.ImageDetails) error {
@@ -382,7 +489,7 @@ func validateImagePolicy(details docker.ImageDetails) error {
 		volumes = append(volumes, volume)
 	}
 	sort.Strings(volumes)
-	return fmt.Errorf("built image declares unsupported writable volumes: %s", strings.Join(volumes, ", "))
+	return fmt.Errorf("preview image declares unsupported writable volumes: %s", strings.Join(volumes, ", "))
 }
 
 func (s *Service) fromSummary(container docker.ContainerSummary) Deployment {

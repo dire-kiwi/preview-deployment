@@ -3,7 +3,7 @@
 set -eu
 
 PROGRAM=previewctl-installer
-REPOSITORY=${PREVIEW_DEPLOYMENT_REPOSITORY:-imeredith/preview-deployment}
+REPOSITORY=${PREVIEW_DEPLOYMENT_REPOSITORY:-dire-kiwi/preview-deployment}
 VERSION=${PREVIEWCTL_VERSION:-latest}
 
 if [ -n "${PREVIEWCTL_INSTALL_DIR:-}" ]; then
@@ -38,7 +38,7 @@ Usage:
 Options:
   --version TAG          Exact release tag, or "latest" (default).
   --install-dir DIR      Destination directory (default: ~/.local/bin).
-  --repository REPO      GitHub repository (default: imeredith/preview-deployment).
+  --repository REPO      GitHub repository (default: dire-kiwi/preview-deployment).
   -h, --help             Show this help.
 
 Environment:

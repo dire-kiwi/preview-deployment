@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/imeredith/preview-deployment/internal/bundle"
-	"github.com/imeredith/preview-deployment/internal/docker"
-	"github.com/imeredith/preview-deployment/internal/orchestrator"
+	"github.com/dire-kiwi/preview-deployment/internal/bundle"
+	"github.com/dire-kiwi/preview-deployment/internal/docker"
+	"github.com/dire-kiwi/preview-deployment/internal/orchestrator"
 )
 
 var (

@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/imeredith/preview-deployment/internal/previewcli"
+	"github.com/dire-kiwi/preview-deployment/internal/previewcli"
 )
 
 var (

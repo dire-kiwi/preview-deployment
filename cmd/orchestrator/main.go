@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/imeredith/preview-deployment/internal/api"
-	"github.com/imeredith/preview-deployment/internal/config"
-	"github.com/imeredith/preview-deployment/internal/docker"
-	"github.com/imeredith/preview-deployment/internal/orchestrator"
+	"github.com/dire-kiwi/preview-deployment/internal/api"
+	"github.com/dire-kiwi/preview-deployment/internal/config"
+	"github.com/dire-kiwi/preview-deployment/internal/docker"
+	"github.com/dire-kiwi/preview-deployment/internal/orchestrator"
 )
 
 func main() {

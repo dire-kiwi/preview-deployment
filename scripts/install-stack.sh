@@ -3,7 +3,7 @@
 set -eu
 
 PROGRAM=preview-deployment-installer
-REPOSITORY=${PREVIEW_DEPLOYMENT_REPOSITORY:-imeredith/preview-deployment}
+REPOSITORY=${PREVIEW_DEPLOYMENT_REPOSITORY:-dire-kiwi/preview-deployment}
 VERSION=${PREVIEW_DEPLOYMENT_VERSION:-latest}
 
 if [ -n "${PREVIEW_DEPLOYMENT_INSTALL_DIR:-}" ]; then
@@ -51,7 +51,7 @@ Options:
   --install-dir DIR      Stack directory (default: $XDG_DATA_HOME/preview-deployment
                          or ~/.local/share/preview-deployment).
   --env-file FILE        Compose environment file (default: INSTALL_DIR/.env).
-  --repository REPO      GitHub repository (default: imeredith/preview-deployment).
+  --repository REPO      GitHub repository (default: dire-kiwi/preview-deployment).
   -h, --help             Show this help.
 
 Environment:

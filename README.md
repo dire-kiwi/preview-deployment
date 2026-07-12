@@ -13,7 +13,7 @@ Requirements: Docker Engine, the Docker Compose plugin, and `curl`.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/imeredith/preview-deployment/releases/latest/download/install-stack.sh | sh
+  https://github.com/dire-kiwi/preview-deployment/releases/latest/download/install-stack.sh | sh
 ```
 
 The command is idempotent: the first run installs the stack and later runs update it. It downloads a versioned Compose file, verifies its SHA-256 checksum, preserves the existing `.env`, pulls images, and reconciles the running services without taking the shared preview network down.
@@ -22,7 +22,7 @@ The default install directory is `${XDG_DATA_HOME:-$HOME/.local/share}/preview-d
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/imeredith/preview-deployment/releases/latest/download/install-stack.sh |
+  https://github.com/dire-kiwi/preview-deployment/releases/latest/download/install-stack.sh |
   sh -s -- --version v0.1.0 --install-dir /opt/preview-deployment
 ```
 
@@ -48,7 +48,7 @@ The standalone CLI supports Linux and macOS on amd64 and arm64:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/imeredith/preview-deployment/releases/latest/download/install-cli.sh | sh
+  https://github.com/dire-kiwi/preview-deployment/releases/latest/download/install-cli.sh | sh
 ```
 
 It installs to `~/.local/bin` by default. Ensure that directory is on `PATH`, then inspect or update the installed version:
@@ -96,7 +96,7 @@ previewctl deploy --manifest preview.json --output json ./app
 
 ## Deploy from GitHub Actions
 
-The companion repository is [`imeredith/preview-deployment-action`](https://github.com/imeredith/preview-deployment-action):
+The companion repository is [`dire-kiwi/preview-deployment-action`](https://github.com/dire-kiwi/preview-deployment-action):
 
 ```yaml
 name: Preview
@@ -118,7 +118,7 @@ jobs:
 
       - name: Deploy preview
         id: preview
-        uses: imeredith/preview-deployment-action@v1
+        uses: dire-kiwi/preview-deployment-action@v1
         with:
           endpoint: http://127.0.0.1:8081
           source: dist/app

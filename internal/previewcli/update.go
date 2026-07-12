@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	defaultRepository = "imeredith/preview-deployment"
+	defaultRepository = "dire-kiwi/preview-deployment"
 	maxReleaseAsset   = 100 << 20
 )
 

@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/imeredith/preview-deployment/internal/bundle"
-	"github.com/imeredith/preview-deployment/internal/config"
-	"github.com/imeredith/preview-deployment/internal/docker"
+	"github.com/dire-kiwi/preview-deployment/internal/bundle"
+	"github.com/dire-kiwi/preview-deployment/internal/config"
+	"github.com/dire-kiwi/preview-deployment/internal/docker"
 )
 
 const (

@@ -21,7 +21,32 @@ import (
 	"time"
 )
 
-const maxErrorBody = 1024 * 1024
+const (
+	maxErrorBody              = 1024 * 1024
+	codexAuthSecretPath       = "/run/secrets/codex-auth.json"
+	previewEntrypointPath     = "/app/preview-entrypoint"
+	previewEntrypointFilename = "preview-entrypoint"
+	previewEntrypoint         = `#!/bin/bash
+set -euo pipefail
+
+auth_source=/run/secrets/codex-auth.json
+if [[ -e "$auth_source" ]]; then
+    export CODEX_HOME="${CODEX_HOME:-${HOME:-/home/preview}/.codex}"
+    mkdir -p "$CODEX_HOME"
+    temporary="$(mktemp "$CODEX_HOME/.auth.json.preview.XXXXXX")"
+    cleanup_auth_copy() {
+        rm -f "$temporary"
+    }
+    trap cleanup_auth_copy EXIT
+    cp "$auth_source" "$temporary"
+    chmod 0600 "$temporary"
+    mv -f "$temporary" "$CODEX_HOME/auth.json"
+    trap - EXIT
+fi
+
+exec /app/app "$@"
+`
+)
 
 // APIError is an error response returned by the Docker Engine.
 type APIError struct {
@@ -105,13 +130,7 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // BuildImage builds an image containing app and the generated Dockerfile.
 func (c *Client) BuildImage(ctx context.Context, image, runtimeImage, deploymentID string, app []byte) error {
-	dockerfile := fmt.Sprintf(`FROM %s
-WORKDIR /app
-COPY app /app/app
-USER 65534:65534
-ENTRYPOINT ["/app/app"]
-LABEL com.preview-deployment.managed="true" com.preview-deployment.id="%s"
-`, runtimeImage, deploymentID)
+	dockerfile := generatedDockerfile(runtimeImage, deploymentID)
 
 	reader, writer := io.Pipe()
 	writeResult := make(chan error, 1)
@@ -169,6 +188,33 @@ LABEL com.preview-deployment.managed="true" com.preview-deployment.id="%s"
 	return nil
 }
 
+func generatedDockerfile(runtimeImage, deploymentID string) string {
+	return fmt.Sprintf(`FROM %s
+USER 0:0
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+        apt-get update; \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates; \
+        rm -rf /var/lib/apt/lists/*; \
+    elif command -v apk >/dev/null 2>&1; then \
+        apk add --no-cache bash ca-certificates; \
+    elif command -v bash >/dev/null 2>&1 && [ -s /etc/ssl/certs/ca-certificates.crt ]; then \
+        :; \
+    else \
+        echo "runtime image must provide apt-get or apk, or already contain Bash and CA certificates" >&2; \
+        exit 1; \
+    fi; \
+    mkdir -p /run/secrets; \
+    chmod 0755 /run/secrets
+WORKDIR /app
+COPY app /app/app
+COPY %s %s
+LABEL com.preview-deployment.managed="true" com.preview-deployment.id="%s"
+USER 65534:65534
+ENTRYPOINT ["%s"]
+`, runtimeImage, previewEntrypointFilename, previewEntrypointPath, deploymentID, previewEntrypointPath)
+}
+
 func writeBuildContext(pipe *io.PipeWriter, dockerfile string, app []byte) error {
 	tarWriter := tar.NewWriter(pipe)
 	write := func(name string, mode int64, contents []byte) error {
@@ -193,6 +239,10 @@ func writeBuildContext(pipe *io.PipeWriter, dockerfile string, app []byte) error
 		return err
 	}
 	if err := write("app", 0o555, app); err != nil {
+		_ = pipe.CloseWithError(err)
+		return err
+	}
+	if err := write(previewEntrypointFilename, 0o555, []byte(previewEntrypoint)); err != nil {
 		_ = pipe.CloseWithError(err)
 		return err
 	}
@@ -280,7 +330,7 @@ func (c *Client) CreateContainer(ctx context.Context, options CreateOptions) (st
 			Source   string `json:"Source"`
 			Target   string `json:"Target"`
 			ReadOnly bool   `json:"ReadOnly"`
-		}{Type: "bind", Source: options.CodexAuthPath, Target: "/tmp/.codex/auth.json", ReadOnly: true})
+		}{Type: "bind", Source: options.CodexAuthPath, Target: codexAuthSecretPath, ReadOnly: true})
 	}
 	requestBody.HostConfig.RestartPolicy.Name = options.RestartPolicy
 	requestBody.HostConfig.LogConfig.Type = "json-file"

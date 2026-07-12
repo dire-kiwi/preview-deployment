@@ -152,7 +152,7 @@ app              required, at ZIP root
 preview.json     optional, at ZIP root
 ```
 
-`app` must be a Linux ELF executable for an architecture supported by the Docker host. It must listen on `0.0.0.0:$PORT`; the orchestrator supplies `PORT` from the manifest, defaulting to `8080`. Generated images use `debian:bookworm-slim`, so static and glibc-linked executables are the simplest choices.
+`app` must be a Linux ELF executable for an architecture supported by the Docker host. It must listen on `0.0.0.0:$PORT`; the orchestrator supplies `PORT` from the manifest, defaulting to `8080`. Generated images use `debian:bookworm-slim` and install Bash plus the system CA bundle in a cached layer before copying the application. Custom runtime images must provide `apt-get` or `apk`, or already contain `/bin/bash` and `/etc/ssl/certs/ca-certificates.crt`.
 
 Example `preview.json`:
 
@@ -171,8 +171,12 @@ Example `preview.json`:
 Unknown manifest fields, a user-provided `PORT`, links, unsafe ZIP paths, non-ELF files, and oversized archives are rejected.
 
 Setting `"codex_auth": true` opts that deployment into a read-only bind mount
-of the host file configured by `CODEX_AUTH_PATH`. The file appears at
-`/tmp/.codex/auth.json`; set `CODEX_HOME=/tmp/.codex` in the manifest environment.
+of the host file configured by `CODEX_AUTH_PATH`. The source appears at
+`/run/secrets/codex-auth.json`. The non-root entrypoint atomically copies it with
+mode `0600` to `$CODEX_HOME/auth.json` on the container's writable tmpfs before
+starting the app, allowing token refreshes without making the host credential
+writable. Set `CODEX_HOME=/tmp/.codex` or another writable tmpfs path in the
+manifest environment.
 Only enable this for trusted code because a process inside the preview can read
 and transmit the mounted credential.
 

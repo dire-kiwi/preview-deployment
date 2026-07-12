@@ -16,7 +16,8 @@ func TestOpenValidBundle(t *testing.T) {
 			"name":"test preview",
 			"port":9090,
 			"args":["--verbose"],
-			"env":{"APP_ENV":"test"}
+			"env":{"APP_ENV":"test"},
+			"codex_auth":true
 		}`),
 		"README.txt": []byte("ignored"),
 	})
@@ -30,6 +31,9 @@ func TestOpenValidBundle(t *testing.T) {
 	}
 	if got.Manifest.Env["APP_ENV"] != "test" {
 		t.Fatalf("manifest env was not read: %#v", got.Manifest.Env)
+	}
+	if !got.Manifest.CodexAuth {
+		t.Fatal("manifest codex_auth was not read")
 	}
 }
 

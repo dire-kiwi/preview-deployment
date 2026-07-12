@@ -23,6 +23,7 @@ type Config struct {
 	PublicPort        int
 	RuntimeImage      string
 	TraefikEntrypoint string
+	CodexAuthPath     string
 
 	MaxUploadBytes   int64
 	MaxBinaryBytes   int64
@@ -48,6 +49,7 @@ func Load() (Config, error) {
 		PublicScheme:      strings.ToLower(envOr("PUBLIC_SCHEME", "http")),
 		RuntimeImage:      envOr("RUNTIME_IMAGE", "debian:bookworm-slim"),
 		TraefikEntrypoint: envOr("TRAEFIK_ENTRYPOINT", "web"),
+		CodexAuthPath:     strings.TrimSpace(envOr("CODEX_AUTH_PATH", "")),
 		DeployTimeout:     10 * time.Minute,
 		StopTimeout:       10 * time.Second,
 	}
@@ -122,6 +124,9 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.RuntimeImage) == "" || strings.ContainsAny(cfg.RuntimeImage, "\r\n\t ") {
 		return Config{}, fmt.Errorf("RUNTIME_IMAGE must be a single Docker image reference")
+	}
+	if cfg.CodexAuthPath != "" && !strings.HasPrefix(cfg.CodexAuthPath, "/") {
+		return Config{}, fmt.Errorf("CODEX_AUTH_PATH must be an absolute host path")
 	}
 
 	return cfg, nil

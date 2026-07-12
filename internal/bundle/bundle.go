@@ -28,10 +28,11 @@ var ErrInvalid = errors.New("invalid deployment archive")
 
 // Manifest is the optional preview.json file at the root of an archive.
 type Manifest struct {
-	Name string            `json:"name,omitempty"`
-	Port int               `json:"port,omitempty"`
-	Args []string          `json:"args,omitempty"`
-	Env  map[string]string `json:"env,omitempty"`
+	Name      string            `json:"name,omitempty"`
+	Port      int               `json:"port,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	CodexAuth bool              `json:"codex_auth,omitempty"`
 }
 
 // Bundle contains the validated executable and runtime configuration.

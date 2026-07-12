@@ -161,6 +161,7 @@ Example `preview.json`:
   "name": "checkout-pr-123",
   "port": 8080,
   "args": ["--log-format=json"],
+  "codex_auth": false,
   "env": {
     "APP_ENV": "preview"
   }
@@ -168,6 +169,12 @@ Example `preview.json`:
 ```
 
 Unknown manifest fields, a user-provided `PORT`, links, unsafe ZIP paths, non-ELF files, and oversized archives are rejected.
+
+Setting `"codex_auth": true` opts that deployment into a read-only bind mount
+of the host file configured by `CODEX_AUTH_PATH`. The file appears at
+`/tmp/.codex/auth.json`; set `CODEX_HOME=/tmp/.codex` in the manifest environment.
+Only enable this for trusted code because a process inside the preview can read
+and transmit the mounted credential.
 
 To package manually:
 
@@ -215,6 +222,8 @@ Copy `.env.example` when running from a source checkout. Common settings are:
 - `TRAEFIK_HTTP_PORT` and `PUBLIC_PORT`: listening and advertised ports; keep them equal.
 - `MAX_DEPLOYMENTS`, `MAX_UPLOAD_MB`, and `BUILD_CONCURRENCY`: platform capacity controls.
 - `PREVIEW_MEMORY_MB`, `PREVIEW_CPUS`, `PREVIEW_PIDS_LIMIT`, and `PREVIEW_TMPFS_MB`: per-preview limits.
+- `CODEX_AUTH_PATH`: optional absolute host path mounted read-only only for
+  manifests that explicitly request `codex_auth`.
 - `PREVIEW_DEPLOYMENT_VERSION`: orchestrator image tag used by Compose.
 
 ## Runtime isolation and security boundary

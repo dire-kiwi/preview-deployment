@@ -217,6 +217,7 @@ type CreateOptions struct {
 	PIDsLimit     int64
 	TmpfsBytes    int64
 	RestartPolicy string
+	CodexAuthPath string
 }
 
 // CreateContainer creates, but does not start, a preview container.
@@ -239,7 +240,13 @@ func (c *Client) CreateContainer(ctx context.Context, options CreateOptions) (st
 			NanoCPUs       int64             `json:"NanoCpus"`
 			PidsLimit      int64             `json:"PidsLimit"`
 			Tmpfs          map[string]string `json:"Tmpfs"`
-			RestartPolicy  struct {
+			Mounts         []struct {
+				Type     string `json:"Type"`
+				Source   string `json:"Source"`
+				Target   string `json:"Target"`
+				ReadOnly bool   `json:"ReadOnly"`
+			} `json:"Mounts,omitempty"`
+			RestartPolicy struct {
 				Name string `json:"Name"`
 			} `json:"RestartPolicy"`
 			LogConfig struct {
@@ -265,6 +272,14 @@ func (c *Client) CreateContainer(ctx context.Context, options CreateOptions) (st
 	requestBody.HostConfig.PidsLimit = options.PIDsLimit
 	requestBody.HostConfig.Tmpfs = map[string]string{
 		"/tmp": fmt.Sprintf("rw,nosuid,nodev,noexec,size=%d", options.TmpfsBytes),
+	}
+	if options.CodexAuthPath != "" {
+		requestBody.HostConfig.Mounts = append(requestBody.HostConfig.Mounts, struct {
+			Type     string `json:"Type"`
+			Source   string `json:"Source"`
+			Target   string `json:"Target"`
+			ReadOnly bool   `json:"ReadOnly"`
+		}{Type: "bind", Source: options.CodexAuthPath, Target: "/tmp/.codex/auth.json", ReadOnly: true})
 	}
 	requestBody.HostConfig.RestartPolicy.Name = options.RestartPolicy
 	requestBody.HostConfig.LogConfig.Type = "json-file"

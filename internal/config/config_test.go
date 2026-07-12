@@ -35,3 +35,19 @@ func TestLoadReadsAPIToken(t *testing.T) {
 		t.Fatalf("APIToken = %q, want test-secret", cfg.APIToken)
 	}
 }
+
+func TestLoadReadsAbsoluteCodexAuthPath(t *testing.T) {
+	t.Setenv("CODEX_AUTH_PATH", "/var/lib/preview/auth.json")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodexAuthPath != "/var/lib/preview/auth.json" {
+		t.Fatalf("CodexAuthPath = %q", cfg.CodexAuthPath)
+	}
+
+	t.Setenv("CODEX_AUTH_PATH", "relative/auth.json")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load accepted a relative CODEX_AUTH_PATH")
+	}
+}

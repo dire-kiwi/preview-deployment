@@ -75,6 +75,9 @@ func New(dockerClient *docker.Client, cfg config.Config, logger *slog.Logger) *S
 
 // Deploy builds an image, creates a sandboxed container, and starts it.
 func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (Deployment, error) {
+	if deploymentBundle.Manifest.CodexAuth && s.config.CodexAuthPath == "" {
+		return Deployment{}, errors.New("deployment requests codex_auth but CODEX_AUTH_PATH is not configured")
+	}
 	if err := s.reserveCapacity(ctx); err != nil {
 		return Deployment{}, err
 	}
@@ -133,6 +136,12 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 		PIDsLimit:     s.config.PreviewPIDs,
 		TmpfsBytes:    s.config.PreviewTmpfsBytes,
 		RestartPolicy: "unless-stopped",
+		CodexAuthPath: func() string {
+			if deploymentBundle.Manifest.CodexAuth {
+				return s.config.CodexAuthPath
+			}
+			return ""
+		}(),
 	})
 	if err != nil {
 		cleanup()

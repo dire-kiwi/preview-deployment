@@ -33,16 +33,48 @@ type Manifest struct {
 	Args      []string          `json:"args,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	CodexAuth bool              `json:"codex_auth,omitempty"`
+	Build     string            `json:"build,omitempty"`
 }
 
-// Bundle contains the validated executable and runtime configuration.
+// BuildMode identifies how the uploaded archive is turned into an image.
+type BuildMode uint8
+
+const (
+	// BuildExecutable preserves the original app-plus-generated-Dockerfile mode.
+	BuildExecutable BuildMode = iota
+	// BuildDockerfile builds the root-level Dockerfile with the uploaded files as
+	// its context.
+	BuildDockerfile
+)
+
+// ContextFile is one validated entry in an uploaded Docker build context.
+// Names are canonical relative POSIX paths and modes contain only safe
+// permission bits.
+type ContextFile struct {
+	Name      string
+	Mode      int64
+	Contents  []byte
+	Directory bool
+}
+
+// Bundle contains the validated build input and runtime configuration.
 type Bundle struct {
-	App      []byte
-	Manifest Manifest
+	App       []byte
+	Context   []ContextFile
+	BuildMode BuildMode
+	Manifest  Manifest
 }
 
-// Open reads a ZIP from filename. The archive must contain a root-level Linux
-// ELF executable named app and may contain a root-level preview.json manifest.
+type archiveEntry struct {
+	file      *zip.File
+	name      string
+	directory bool
+}
+
+// Open reads a ZIP from filename. By default the archive must contain a
+// root-level Linux ELF executable named app. A preview.json with
+// "build":"dockerfile" instead requires a root-level Dockerfile and treats
+// every other regular entry except preview.json as its build context.
 func Open(filename string, maxBinaryBytes int64) (Bundle, error) {
 	reader, err := zip.OpenReader(filename)
 	if err != nil {
@@ -55,40 +87,39 @@ func Open(filename string, maxBinaryBytes int64) (Bundle, error) {
 	}
 
 	manifest := Manifest{Port: 8080, Env: map[string]string{}}
-	var app []byte
-	appFound := false
-	manifestFound := false
+	var entries []archiveEntry
+	var appFile *zip.File
+	var dockerfileFile *zip.File
+	seen := make(map[string]struct{}, len(reader.File))
 
 	for _, file := range reader.File {
 		name, err := safeName(file.Name)
 		if err != nil {
 			return Bundle{}, err
 		}
+		if _, duplicate := seen[name]; duplicate {
+			return Bundle{}, invalidf("archive contains path %q more than once", name)
+		}
+		seen[name] = struct{}{}
+
 		if file.Mode()&os.ModeSymlink != 0 {
 			return Bundle{}, invalidf("symbolic links are not allowed: %q", file.Name)
 		}
-		if file.FileInfo().IsDir() {
+		directory := file.FileInfo().IsDir()
+		if !directory && !file.Mode().IsRegular() {
+			return Bundle{}, invalidf("special files are not allowed: %q", file.Name)
+		}
+		entries = append(entries, archiveEntry{file: file, name: name, directory: directory})
+		if directory {
 			continue
 		}
 
 		switch name {
 		case "app":
-			if appFound {
-				return Bundle{}, invalidf("archive contains app more than once")
-			}
-			appFound = true
-			if file.UncompressedSize64 > uint64(maxBinaryBytes) {
-				return Bundle{}, invalidf("app exceeds the %d-byte uncompressed limit", maxBinaryBytes)
-			}
-			app, err = readZipFile(file, maxBinaryBytes)
-			if err != nil {
-				return Bundle{}, invalidf("cannot read app: %v", err)
-			}
+			appFile = file
+		case "Dockerfile":
+			dockerfileFile = file
 		case "preview.json":
-			if manifestFound {
-				return Bundle{}, invalidf("archive contains preview.json more than once")
-			}
-			manifestFound = true
 			contents, readErr := readZipFile(file, maxManifestSize)
 			if readErr != nil {
 				return Bundle{}, invalidf("cannot read preview.json: %v", readErr)
@@ -108,31 +139,96 @@ func Open(filename string, maxBinaryBytes int64) (Bundle, error) {
 		}
 	}
 
-	if !appFound {
-		return Bundle{}, invalidf("archive must contain a root-level file named app")
-	}
-	if len(app) == 0 {
-		return Bundle{}, invalidf("app is empty")
-	}
-	if err := validateELF(app); err != nil {
-		return Bundle{}, err
-	}
 	if err := validateManifest(manifest); err != nil {
 		return Bundle{}, err
 	}
 
-	return Bundle{App: app, Manifest: manifest}, nil
+	switch manifest.Build {
+	case "", "executable":
+		if appFile == nil {
+			return Bundle{}, invalidf("archive must contain a root-level file named app")
+		}
+		if appFile.UncompressedSize64 > uint64(maxBinaryBytes) {
+			return Bundle{}, invalidf("app exceeds the %d-byte uncompressed limit", maxBinaryBytes)
+		}
+		app, readErr := readZipFile(appFile, maxBinaryBytes)
+		if readErr != nil {
+			return Bundle{}, invalidf("cannot read app: %v", readErr)
+		}
+		if len(app) == 0 {
+			return Bundle{}, invalidf("app is empty")
+		}
+		if err := validateELF(app); err != nil {
+			return Bundle{}, err
+		}
+		return Bundle{App: app, BuildMode: BuildExecutable, Manifest: manifest}, nil
+
+	case "dockerfile":
+		if dockerfileFile == nil {
+			return Bundle{}, invalidf("dockerfile build must contain a root-level file named Dockerfile")
+		}
+		if dockerfileFile.UncompressedSize64 == 0 {
+			return Bundle{}, invalidf("root-level Dockerfile is empty")
+		}
+		contextFiles, contextErr := readContext(entries, maxBinaryBytes)
+		if contextErr != nil {
+			return Bundle{}, contextErr
+		}
+		return Bundle{Context: contextFiles, BuildMode: BuildDockerfile, Manifest: manifest}, nil
+
+	default:
+		// validateManifest rejects this, but keep the switch exhaustive if its
+		// validation changes independently later.
+		return Bundle{}, invalidf("unsupported preview.json build mode %q", manifest.Build)
+	}
 }
 
 func safeName(name string) (string, error) {
-	if name == "" || strings.Contains(name, "\\") || strings.HasPrefix(name, "/") {
+	if name == "" || !utf8.ValidString(name) || hasControl(name) || strings.Contains(name, "\\") || strings.ContainsRune(name, '\x00') || strings.HasPrefix(name, "/") {
 		return "", invalidf("unsafe archive path %q", name)
 	}
-	clean := path.Clean(name)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+	canonical := strings.TrimSuffix(name, "/")
+	clean := path.Clean(canonical)
+	if canonical == "" || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean != canonical {
 		return "", invalidf("unsafe archive path %q", name)
 	}
 	return clean, nil
+}
+
+func readContext(entries []archiveEntry, limit int64) ([]ContextFile, error) {
+	contextFiles := make([]ContextFile, 0, len(entries))
+	remaining := limit
+	for _, entry := range entries {
+		if entry.name == "preview.json" {
+			continue
+		}
+		if entry.directory {
+			contextFiles = append(contextFiles, ContextFile{
+				Name:      entry.name,
+				Mode:      0o755,
+				Directory: true,
+			})
+			continue
+		}
+		if remaining < 0 || entry.file.UncompressedSize64 > uint64(remaining) {
+			return nil, invalidf("Docker build context exceeds the %d-byte uncompressed limit", limit)
+		}
+		contents, err := readZipFile(entry.file, remaining)
+		if err != nil {
+			return nil, invalidf("cannot read Docker build context file %q: %v", entry.name, err)
+		}
+		remaining -= int64(len(contents))
+		mode := int64(0o644)
+		if entry.file.Mode().Perm()&0o111 != 0 {
+			mode = 0o755
+		}
+		contextFiles = append(contextFiles, ContextFile{
+			Name:     entry.name,
+			Mode:     mode,
+			Contents: contents,
+		})
+	}
+	return contextFiles, nil
 }
 
 func readZipFile(file *zip.File, limit int64) ([]byte, error) {
@@ -167,6 +263,9 @@ func validateELF(app []byte) error {
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func validateManifest(manifest Manifest) error {
+	if manifest.Build != "" && manifest.Build != "executable" && manifest.Build != "dockerfile" {
+		return invalidf(`preview.json build must be "executable" or "dockerfile"`)
+	}
 	if manifest.Port < 1 || manifest.Port > 65535 {
 		return invalidf("preview.json port must be between 1 and 65535")
 	}

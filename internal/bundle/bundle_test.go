@@ -3,6 +3,7 @@ package bundle
 import (
 	"archive/zip"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,9 @@ func TestOpenValidBundle(t *testing.T) {
 	if !got.Manifest.CodexAuth {
 		t.Fatal("manifest codex_auth was not read")
 	}
+	if got.BuildMode != BuildExecutable {
+		t.Fatalf("build mode = %v, want executable", got.BuildMode)
+	}
 }
 
 func TestOpenDefaultsPort(t *testing.T) {
@@ -45,6 +49,68 @@ func TestOpenDefaultsPort(t *testing.T) {
 	}
 	if got.Manifest.Port != 8080 {
 		t.Fatalf("port = %d, want 8080", got.Manifest.Port)
+	}
+}
+
+func TestOpenExplicitExecutableBundle(t *testing.T) {
+	filename := writeZIP(t, map[string][]byte{
+		"app":          minimalELF(),
+		"preview.json": []byte(`{"build":"executable"}`),
+		"Dockerfile":   []byte("ignored in executable mode"),
+	})
+	got, err := Open(filename, 1024)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if got.BuildMode != BuildExecutable || len(got.App) == 0 || len(got.Context) != 0 {
+		t.Fatalf("unexpected executable bundle: %#v", got)
+	}
+}
+
+func TestOpenDockerfileBundle(t *testing.T) {
+	filename := writeZIPEntries(t, []testZIPEntry{
+		{name: "Dockerfile", contents: []byte("FROM scratch\nCOPY . /site\n")},
+		{name: "preview.json", contents: []byte(`{"build":"dockerfile","name":"wordpress","port":8088}`)},
+		{name: "app", contents: []byte("a context file, not an ELF")},
+		{name: "theme/", mode: os.ModeDir | 0o755},
+		{name: "theme/index.php", contents: []byte("<?php echo 'ok';")},
+		{name: "scripts/start.sh", contents: []byte("#!/bin/sh\nexec php \"$@\"\n"), mode: 0o755},
+	})
+
+	got, err := Open(filename, 1024*1024)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if got.BuildMode != BuildDockerfile {
+		t.Fatalf("build mode = %v, want dockerfile", got.BuildMode)
+	}
+	if len(got.App) != 0 {
+		t.Fatalf("Dockerfile bundle app = %d bytes, want none", len(got.App))
+	}
+	if got.Manifest.Name != "wordpress" || got.Manifest.Port != 8088 {
+		t.Fatalf("unexpected manifest: %#v", got.Manifest)
+	}
+
+	files := make(map[string]ContextFile, len(got.Context))
+	for _, file := range got.Context {
+		files[file.Name] = file
+	}
+	for _, name := range []string{"Dockerfile", "app", "theme", "theme/index.php", "scripts/start.sh"} {
+		if _, ok := files[name]; !ok {
+			t.Errorf("context is missing %q: %#v", name, got.Context)
+		}
+	}
+	if _, ok := files["preview.json"]; ok {
+		t.Fatal("preview.json was included in the Docker build context")
+	}
+	if !files["theme"].Directory || files["theme"].Mode != 0o755 {
+		t.Errorf("theme directory = %#v", files["theme"])
+	}
+	if files["theme/index.php"].Mode != 0o644 {
+		t.Errorf("index.php mode = %#o, want 0644", files["theme/index.php"].Mode)
+	}
+	if files["scripts/start.sh"].Mode != 0o755 {
+		t.Errorf("start.sh mode = %#o, want 0755", files["scripts/start.sh"].Mode)
 	}
 }
 
@@ -84,6 +150,45 @@ func TestOpenRejectsInvalidBundles(t *testing.T) {
 			files:   map[string][]byte{"app": minimalELF(), "../secret": []byte("no")},
 			wantErr: "unsafe archive path",
 		},
+		{
+			name:    "noncanonical path",
+			files:   map[string][]byte{"app": minimalELF(), "nested//file": []byte("no")},
+			wantErr: "unsafe archive path",
+		},
+		{
+			name:    "unsupported build mode",
+			files:   map[string][]byte{"app": minimalELF(), "preview.json": []byte(`{"build":"compose"}`)},
+			wantErr: "build must be",
+		},
+		{
+			name:    "Dockerfile mode missing Dockerfile",
+			files:   map[string][]byte{"preview.json": []byte(`{"build":"dockerfile"}`)},
+			wantErr: "root-level file named Dockerfile",
+		},
+		{
+			name: "Dockerfile mode only has nested Dockerfile",
+			files: map[string][]byte{
+				"preview.json":      []byte(`{"build":"dockerfile"}`),
+				"nested/Dockerfile": []byte("FROM scratch"),
+			},
+			wantErr: "root-level file named Dockerfile",
+		},
+		{
+			name: "empty Dockerfile",
+			files: map[string][]byte{
+				"Dockerfile":   {},
+				"preview.json": []byte(`{"build":"dockerfile"}`),
+			},
+			wantErr: "Dockerfile is empty",
+		},
+		{
+			name: "control character path",
+			files: map[string][]byte{
+				"app":       minimalELF(),
+				"bad\nname": []byte("no"),
+			},
+			wantErr: "unsafe archive path",
+		},
 	}
 
 	for _, test := range tests {
@@ -105,7 +210,87 @@ func TestOpenEnforcesUncompressedLimit(t *testing.T) {
 	}
 }
 
+func TestOpenDockerfileEnforcesAggregateUncompressedLimit(t *testing.T) {
+	filename := writeZIP(t, map[string][]byte{
+		"Dockerfile":   []byte("FROM scratch\n"),
+		"first.txt":    []byte("12345678"),
+		"second.txt":   []byte("abcdefgh"),
+		"preview.json": []byte(`{"build":"dockerfile"}`),
+	})
+	_, err := Open(filename, 24)
+	if err == nil || !strings.Contains(err.Error(), "Docker build context exceeds") {
+		t.Fatalf("Open() error = %v, want aggregate context limit", err)
+	}
+}
+
+func TestOpenRejectsDuplicateCanonicalPaths(t *testing.T) {
+	filename := writeZIPEntries(t, []testZIPEntry{
+		{name: "app", contents: minimalELF()},
+		{name: "duplicate", contents: []byte("one")},
+		{name: "duplicate", contents: []byte("two")},
+	})
+	_, err := Open(filename, 1024)
+	if err == nil || !strings.Contains(err.Error(), "more than once") {
+		t.Fatalf("Open() error = %v, want duplicate path", err)
+	}
+}
+
+func TestOpenRejectsLinksAndSpecialFiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    os.FileMode
+		wantErr string
+	}{
+		{name: "symlink", mode: os.ModeSymlink | 0o777, wantErr: "symbolic links"},
+		{name: "named pipe", mode: os.ModeNamedPipe | 0o644, wantErr: "special files"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			filename := writeZIPEntries(t, []testZIPEntry{
+				{name: "app", contents: minimalELF()},
+				{name: "unsafe", contents: []byte("target"), mode: test.mode},
+			})
+			_, err := Open(filename, 1024)
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("Open() error = %v, want containing %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestOpenEnforcesEntryLimit(t *testing.T) {
+	entries := make([]testZIPEntry, 0, maxEntries+1)
+	entries = append(entries, testZIPEntry{name: "app", contents: minimalELF()})
+	for index := 1; index <= maxEntries; index++ {
+		entries = append(entries, testZIPEntry{name: filepath.Join("files", strings.Repeat("x", index%20+1), string(rune('a'+index%26))), contents: []byte("x")})
+	}
+	// Ensure generated names are unique even when the decorative portion wraps.
+	for index := range entries[1:] {
+		entries[index+1].name = filepath.ToSlash(filepath.Join("files", fmt.Sprintf("%03d", index)))
+	}
+	filename := writeZIPEntries(t, entries)
+	_, err := Open(filename, 1024*1024)
+	if err == nil || !strings.Contains(err.Error(), "more than 256 entries") {
+		t.Fatalf("Open() error = %v, want entry limit", err)
+	}
+}
+
 func writeZIP(t *testing.T, files map[string][]byte) string {
+	t.Helper()
+	entries := make([]testZIPEntry, 0, len(files))
+	for name, contents := range files {
+		entries = append(entries, testZIPEntry{name: name, contents: contents})
+	}
+	return writeZIPEntries(t, entries)
+}
+
+type testZIPEntry struct {
+	name     string
+	contents []byte
+	mode     os.FileMode
+}
+
+func writeZIPEntries(t *testing.T, entries []testZIPEntry) string {
 	t.Helper()
 	filename := filepath.Join(t.TempDir(), "deployment.zip")
 	output, err := os.Create(filename)
@@ -113,12 +298,18 @@ func writeZIP(t *testing.T, files map[string][]byte) string {
 		t.Fatal(err)
 	}
 	writer := zip.NewWriter(output)
-	for name, contents := range files {
-		entry, err := writer.Create(name)
+	for _, testEntry := range entries {
+		header := &zip.FileHeader{Name: testEntry.name, Method: zip.Deflate}
+		mode := testEntry.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		header.SetMode(mode)
+		entry, err := writer.CreateHeader(header)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := entry.Write(contents); err != nil {
+		if _, err := entry.Write(testEntry.contents); err != nil {
 			t.Fatal(err)
 		}
 	}

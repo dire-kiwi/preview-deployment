@@ -150,6 +150,66 @@ func TestRunDeployPackagesExecutable(t *testing.T) {
 	}
 }
 
+func TestRunDeployPackagesDockerContextIntoOneZIP(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "Dockerfile"), []byte("FROM scratch\nCOPY public /public\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(directory, "public"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "public", "index.html"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "preview.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"name":"docker-context","port":8080}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/deployments" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Content-Type") != "application/zip" {
+			t.Errorf("Content-Type = %q", r.Header.Get("Content-Type"))
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries := map[string]*zip.File{}
+		for _, entry := range reader.File {
+			entries[entry.Name] = entry
+		}
+		for _, name := range []string{"Dockerfile", "public/index.html", "preview.json"} {
+			if entries[name] == nil {
+				t.Errorf("archive is missing %q", name)
+			}
+		}
+		manifest := readTestZIPJSON(t, entries["preview.json"])
+		if manifest["build"] != "dockerfile" || manifest["name"] != "docker-context" {
+			t.Errorf("manifest = %#v", manifest)
+		}
+		writeTestJSON(w, http.StatusCreated, map[string]any{"id": "fedcba987654", "name": "docker-context", "status": "running", "url": "http://fedcba987654.localhost"})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Run(context.Background(), []string{"--api-url", server.URL, "deploy", "--manifest", manifestPath, "--output", "json", directory}, Streams{Out: &stdout, Err: &stderr}, BuildInfo{Version: "v0.1.6"})
+	if exitCode != 0 {
+		t.Fatalf("exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("deployment requests = %d, want 1", requests)
+	}
+}
+
 func TestRunRejectsFlagsAfterDeploySource(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exitCode := Run(context.Background(), []string{"deploy", "app", "--output", "json"}, Streams{Out: &stdout, Err: &stderr}, BuildInfo{})

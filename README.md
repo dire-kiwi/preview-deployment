@@ -94,6 +94,19 @@ Or give the CLI a Linux executable and optional manifest; it creates the ZIP wit
 previewctl deploy --manifest preview.json --output json ./app
 ```
 
+For a custom image, point the same command at a directory containing a
+root-level `Dockerfile`. The CLI applies `.dockerignore`, excludes `.git`,
+creates one ZIP containing the sanitized build context and manifest, and uploads
+that ZIP to the orchestrator. Docker builds and stores the image only on the
+preview server:
+
+```sh
+previewctl deploy --manifest preview.json --output json .
+```
+
+Open the read-only deployment dashboard at the orchestrator's root URL, such as
+`https://api.preview.example.com/`.
+
 ## Deploy from GitHub Actions
 
 The companion repository is [`dire-kiwi/preview-deployment-action`](https://github.com/dire-kiwi/preview-deployment-action):
@@ -143,21 +156,39 @@ PREVIEWCTL_TOKEN='replace-with-a-secret' previewctl list
 
 Authentication is disabled when `API_TOKEN` is empty, preserving local-development behavior. Bearer authentication does not provide encryption: use HTTPS whenever traffic leaves a trusted host or private network.
 
-## ZIP contract
+## ZIP contracts
 
-An uploaded ZIP contains:
+The original executable form contains:
 
 ```text
 app              required, at ZIP root
-preview.json     optional, at ZIP root
+preview.json     optional, at ZIP root; build omitted or "executable"
 ```
 
 `app` must be a Linux ELF executable for an architecture supported by the Docker host. It must listen on `0.0.0.0:$PORT`; the orchestrator supplies `PORT` from the manifest, defaulting to `8080`. Generated images use `debian:bookworm-slim` and install Bash plus the system CA bundle in a cached layer before copying the application. Custom runtime images must provide `apt-get` or `apk`, or already contain `/bin/bash` and `/etc/ssl/certs/ca-certificates.crt`.
+
+The Dockerfile form contains:
+
+```text
+Dockerfile        required, exactly at ZIP root
+preview.json      required, at ZIP root with "build":"dockerfile"
+...               regular build-context files and directories
+```
+
+The orchestrator validates the expanded context, converts it to a sanitized TAR,
+and invokes the Docker Engine on the preview host. It never extracts the upload
+onto the host and never pushes the resulting `preview-deployment/<id>:latest`
+image to a registry. Paths must be canonical relative POSIX paths; duplicate
+entries, links, special files, traversal, oversized contexts, and images that
+declare Docker volumes are rejected. Dockerfile builds are for trusted code:
+build-time `RUN` instructions have network access and are not a strong
+multi-tenant sandbox.
 
 Example `preview.json`:
 
 ```json
 {
+  "build": "executable",
   "name": "checkout-pr-123",
   "port": 8080,
   "args": ["--log-format=json"],
@@ -168,7 +199,9 @@ Example `preview.json`:
 }
 ```
 
-Unknown manifest fields, a user-provided `PORT`, links, unsafe ZIP paths, non-ELF files, and oversized archives are rejected.
+`build` may be `executable` or `dockerfile`; omitting it preserves executable
+behavior. Unknown manifest fields, a user-provided `PORT`, links, unsafe ZIP
+paths, non-ELF executable files, and oversized archives are rejected.
 
 Setting `"codex_auth": true` opts that deployment into a read-only bind mount
 of the host file configured by `CODEX_AUTH_PATH`. The source appears at
@@ -194,6 +227,7 @@ curl --fail-with-body -H 'Content-Type: application/zip' \
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/` | Read-only deployment dashboard |
 | `POST` | `/v1/deployments` | Upload, build, create, and start |
 | `GET` | `/v1/deployments` | List managed deployments |
 | `GET` | `/v1/deployments/{id}` | Inspect one deployment |
@@ -232,6 +266,12 @@ Copy `.env.example` when running from a source checkout. Common settings are:
 
 ## Runtime isolation and security boundary
 
-Generated preview containers run as UID/GID `65534`, with a read-only root filesystem, a no-exec ephemeral `/tmp`, an executable ephemeral `/home/preview` workspace, all Linux capabilities dropped, `no-new-privileges`, no host ports, and CPU, memory, PID, log-size, and deployment-count limits. The only supported host mount is the explicit read-only Codex auth opt-in described above.
+Generated and Dockerfile-built preview containers run as UID/GID `65534`, with
+a read-only root filesystem, a no-exec ephemeral `/tmp`, an executable ephemeral
+`/home/preview` workspace, all Linux capabilities dropped,
+`no-new-privileges`, no host ports, and CPU, memory, PID, log-size, and
+deployment-count limits. Dockerfile images retain their entrypoint and working
+directory but cannot declare volumes. The only supported host mount is the
+explicit read-only Codex auth opt-in described above.
 
 The platform still executes uploaded code. The orchestrator's Docker socket access is effectively host-root access even though the socket mount is read-only. Before allowing untrusted users or remote traffic, use a dedicated host or isolated Docker daemon, terminate TLS, set `API_TOKEN`, restrict egress, protect the Traefik dashboard, and consider a tightly scoped Docker socket proxy. Preview filesystems are ephemeral; application data and volumes are not persisted.

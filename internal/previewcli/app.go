@@ -155,8 +155,10 @@ func (a *app) parseGlobal(args []string) (globalOptions, []string, error) {
 func (a *app) runDeploy(ctx context.Context, client *Client, args []string) error {
 	const usage = `Usage: previewctl [global flags] deploy [--manifest FILE] [--output text|json] SOURCE
 
-SOURCE may be an existing deployment ZIP or an executable. Executables are
-packaged as root-level app with an optional preview.json manifest.
+SOURCE may be an existing deployment ZIP, an executable, or a Docker build
+context directory. Executables are packaged as root-level app. Directories
+must contain a root Dockerfile and are packaged into one ZIP. An optional
+preview.json manifest may be supplied with either generated ZIP form.
 `
 	flags := newCommandFlags("deploy")
 	manifest := flags.String("manifest", "", "preview.json to package with an executable")
@@ -557,7 +559,7 @@ Usage:
   previewctl [global flags] COMMAND [command flags]
 
 Commands:
-  deploy    Upload a ZIP or package and upload an executable
+  deploy    Upload a ZIP or package an executable or Docker context
   list      List deployments
   get       Show one deployment
   logs      Read deployment logs

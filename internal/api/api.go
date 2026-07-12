@@ -58,6 +58,7 @@ func New(service *orchestrator.Service, dockerClient *docker.Client, logger *slo
 
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", a.dashboard)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /v1/deployments", a.listDeployments)
 	mux.HandleFunc("POST /v1/deployments", a.createDeployment)

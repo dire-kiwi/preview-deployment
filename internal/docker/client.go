@@ -16,9 +16,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/dire-kiwi/preview-deployment/internal/bundle"
 )
 
 const (
@@ -131,11 +136,29 @@ func (c *Client) Ping(ctx context.Context) error {
 // BuildImage builds an image containing app and the generated Dockerfile.
 func (c *Client) BuildImage(ctx context.Context, image, runtimeImage, deploymentID string, app []byte) error {
 	dockerfile := generatedDockerfile(runtimeImage, deploymentID)
+	return c.buildImage(ctx, image, func(writer io.Writer) error {
+		return writeBuildContext(writer, dockerfile, app)
+	})
+}
 
+// BuildContextImage builds an image from a validated uploaded Docker context.
+func (c *Client) BuildContextImage(ctx context.Context, image string, files []bundle.ContextFile) error {
+	return c.buildImage(ctx, image, func(writer io.Writer) error {
+		return writeDockerfileBuildContext(writer, files)
+	})
+}
+
+func (c *Client) buildImage(ctx context.Context, image string, writeContext func(io.Writer) error) error {
 	reader, writer := io.Pipe()
 	writeResult := make(chan error, 1)
 	go func() {
-		writeResult <- writeBuildContext(writer, dockerfile, app)
+		writeErr := writeContext(writer)
+		if writeErr != nil {
+			_ = writer.CloseWithError(writeErr)
+		} else {
+			writeErr = writer.Close()
+		}
+		writeResult <- writeErr
 	}()
 
 	query := url.Values{}
@@ -215,8 +238,8 @@ ENTRYPOINT ["%s"]
 `, runtimeImage, previewEntrypointFilename, previewEntrypointPath, deploymentID, previewEntrypointPath)
 }
 
-func writeBuildContext(pipe *io.PipeWriter, dockerfile string, app []byte) error {
-	tarWriter := tar.NewWriter(pipe)
+func writeBuildContext(destination io.Writer, dockerfile string, app []byte) error {
+	tarWriter := tar.NewWriter(destination)
 	write := func(name string, mode int64, contents []byte) error {
 		header := &tar.Header{
 			Name:       name,
@@ -235,28 +258,101 @@ func writeBuildContext(pipe *io.PipeWriter, dockerfile string, app []byte) error
 	}
 
 	if err := write("Dockerfile", 0o644, []byte(dockerfile)); err != nil {
-		_ = pipe.CloseWithError(err)
 		return err
 	}
 	if err := write("app", 0o555, app); err != nil {
-		_ = pipe.CloseWithError(err)
 		return err
 	}
 	if err := write(previewEntrypointFilename, 0o555, []byte(previewEntrypoint)); err != nil {
-		_ = pipe.CloseWithError(err)
 		return err
 	}
-	if err := tarWriter.Close(); err != nil {
-		_ = pipe.CloseWithError(err)
-		return err
+	return tarWriter.Close()
+}
+
+func writeDockerfileBuildContext(destination io.Writer, files []bundle.ContextFile) error {
+	seen := make(map[string]struct{}, len(files))
+	dockerfileFound := false
+	for _, file := range files {
+		if file.Name == "preview.json" {
+			continue
+		}
+		if !safeBuildContextName(file.Name) {
+			return fmt.Errorf("unsafe Docker build context path %q", file.Name)
+		}
+		if _, duplicate := seen[file.Name]; duplicate {
+			return fmt.Errorf("Docker build context path %q appears more than once", file.Name)
+		}
+		seen[file.Name] = struct{}{}
+		if file.Name == "Dockerfile" && !file.Directory {
+			dockerfileFound = true
+		}
 	}
-	return pipe.Close()
+	if !dockerfileFound {
+		return errors.New("Docker build context does not contain a root-level Dockerfile")
+	}
+
+	tarWriter := tar.NewWriter(destination)
+	for _, file := range files {
+		if file.Name == "preview.json" {
+			continue
+		}
+		name := file.Name
+		mode := int64(0o644)
+		header := &tar.Header{
+			Name:       name,
+			Mode:       mode,
+			Size:       int64(len(file.Contents)),
+			ModTime:    time.Unix(0, 0),
+			AccessTime: time.Unix(0, 0),
+			ChangeTime: time.Unix(0, 0),
+			Format:     tar.FormatPAX,
+		}
+		if file.Directory {
+			header.Name += "/"
+			header.Mode = 0o755
+			header.Size = 0
+			header.Typeflag = tar.TypeDir
+		} else if file.Mode&0o111 != 0 {
+			header.Mode = 0o755
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+		if !file.Directory {
+			if _, err := tarWriter.Write(file.Contents); err != nil {
+				return err
+			}
+		}
+	}
+	return tarWriter.Close()
+}
+
+func safeBuildContextName(name string) bool {
+	return name != "" &&
+		utf8.ValidString(name) &&
+		!containsControl(name) &&
+		!strings.Contains(name, "\\") &&
+		!strings.ContainsRune(name, '\x00') &&
+		!strings.HasPrefix(name, "/") &&
+		name != "." && name != ".." &&
+		!strings.HasPrefix(name, "../") &&
+		path.Clean(name) == name
+}
+
+func containsControl(value string) bool {
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateOptions defines a sandboxed preview container.
 type CreateOptions struct {
 	Name          string
 	Image         string
+	WorkingDir    string
 	Args          []string
 	Env           []string
 	Labels        map[string]string
@@ -276,7 +372,7 @@ func (c *Client) CreateContainer(ctx context.Context, options CreateOptions) (st
 	requestBody := struct {
 		Image        string              `json:"Image"`
 		User         string              `json:"User"`
-		WorkingDir   string              `json:"WorkingDir"`
+		WorkingDir   string              `json:"WorkingDir,omitempty"`
 		Cmd          []string            `json:"Cmd,omitempty"`
 		Env          []string            `json:"Env,omitempty"`
 		Labels       map[string]string   `json:"Labels"`
@@ -307,7 +403,7 @@ func (c *Client) CreateContainer(ctx context.Context, options CreateOptions) (st
 	}{
 		Image:        options.Image,
 		User:         "65534:65534",
-		WorkingDir:   "/app",
+		WorkingDir:   options.WorkingDir,
 		Cmd:          options.Args,
 		Env:          options.Env,
 		Labels:       options.Labels,
@@ -396,6 +492,14 @@ type ContainerDetails struct {
 	} `json:"State"`
 }
 
+// ImageDetails is the subset of image metadata used to enforce the runtime
+// filesystem policy before a container is created.
+type ImageDetails struct {
+	Config struct {
+		Volumes map[string]struct{} `json:"Volumes"`
+	} `json:"Config"`
+}
+
 // ListContainers lists containers matching every supplied label.
 func (c *Client) ListContainers(ctx context.Context, labels map[string]string) ([]ContainerSummary, error) {
 	labelFilters := make([]string, 0, len(labels))
@@ -435,6 +539,23 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerDeta
 	var details ContainerDetails
 	if err := json.NewDecoder(response.Body).Decode(&details); err != nil {
 		return ContainerDetails{}, fmt.Errorf("decode container inspection: %w", err)
+	}
+	return details, nil
+}
+
+// InspectImage returns image configuration relevant to container isolation.
+func (c *Client) InspectImage(ctx context.Context, image string) (ImageDetails, error) {
+	response, err := c.request(ctx, http.MethodGet, "/images/"+image+"/json", nil, nil, true)
+	if err != nil {
+		return ImageDetails{}, fmt.Errorf("inspect image: %w", err)
+	}
+	defer response.Body.Close()
+	if err := checkResponse(response); err != nil {
+		return ImageDetails{}, fmt.Errorf("inspect image: %w", err)
+	}
+	var details ImageDetails
+	if err := json.NewDecoder(response.Body).Decode(&details); err != nil {
+		return ImageDetails{}, fmt.Errorf("decode image inspection: %w", err)
 	}
 	return details, nil
 }

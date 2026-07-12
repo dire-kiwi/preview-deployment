@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/dire-kiwi/preview-deployment/internal/bundle"
 )
 
 func TestDecodeLogStream(t *testing.T) {
@@ -48,33 +50,11 @@ func TestDecodeLogStreamRejectsPartialFrame(t *testing.T) {
 }
 
 func TestWriteBuildContext(t *testing.T) {
-	reader, writer := io.Pipe()
-	done := make(chan error, 1)
-	go func() { done <- writeBuildContext(writer, "FROM scratch\n", []byte("binary")) }()
-
-	type entry struct {
-		mode     int64
-		contents string
-	}
-	entries := make(map[string]entry)
-	tarReader := tar.NewReader(reader)
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("reading context header: %v", err)
-		}
-		contents, err := io.ReadAll(tarReader)
-		if err != nil {
-			t.Fatalf("reading %s: %v", header.Name, err)
-		}
-		entries[header.Name] = entry{mode: header.Mode, contents: string(contents)}
-	}
-	if err := <-done; err != nil {
+	var context bytes.Buffer
+	if err := writeBuildContext(&context, "FROM scratch\n", []byte("binary")); err != nil {
 		t.Fatalf("writeBuildContext() error = %v", err)
 	}
+	entries := readTarEntries(t, context.Bytes())
 	want := map[string]entry{
 		"Dockerfile":              {mode: 0o644, contents: "FROM scratch\n"},
 		"app":                     {mode: 0o555, contents: "binary"},
@@ -87,6 +67,110 @@ func TestWriteBuildContext(t *testing.T) {
 		if entries[name] != expected {
 			t.Errorf("build context %s = %#v, want %#v", name, entries[name], expected)
 		}
+	}
+}
+
+func TestWriteDockerfileBuildContextSanitizesEntries(t *testing.T) {
+	files := []bundle.ContextFile{
+		{Name: "Dockerfile", Mode: 0o666, Contents: []byte("FROM scratch\n")},
+		{Name: "preview.json", Mode: 0o644, Contents: []byte(`{"build":"dockerfile"}`)},
+		{Name: "empty", Mode: 0o777, Directory: true},
+		{Name: "scripts/start.sh", Mode: 0o777, Contents: []byte("#!/bin/sh\n")},
+		{Name: "theme/index.php", Mode: 0o666, Contents: []byte("<?php")},
+	}
+	var context bytes.Buffer
+	if err := writeDockerfileBuildContext(&context, files); err != nil {
+		t.Fatalf("writeDockerfileBuildContext() error = %v", err)
+	}
+	entries := readTarEntries(t, context.Bytes())
+	if _, exists := entries["preview.json"]; exists {
+		t.Fatal("preview.json was written to the Docker build context")
+	}
+	for name, want := range map[string]entry{
+		"Dockerfile":       {mode: 0o644, contents: "FROM scratch\n"},
+		"empty/":           {mode: 0o755, directory: true},
+		"scripts/start.sh": {mode: 0o755, contents: "#!/bin/sh\n"},
+		"theme/index.php":  {mode: 0o644, contents: "<?php"},
+	} {
+		if got := entries[name]; got != want {
+			t.Errorf("entry %q = %#v, want %#v", name, got, want)
+		}
+	}
+}
+
+func TestWriteDockerfileBuildContextRejectsUnsafeInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []bundle.ContextFile
+	}{
+		{
+			name:  "missing Dockerfile",
+			files: []bundle.ContextFile{{Name: "file", Contents: []byte("contents")}},
+		},
+		{
+			name: "unsafe path",
+			files: []bundle.ContextFile{
+				{Name: "Dockerfile", Contents: []byte("FROM scratch")},
+				{Name: "../secret", Contents: []byte("secret")},
+			},
+		},
+		{
+			name: "duplicate path",
+			files: []bundle.ContextFile{
+				{Name: "Dockerfile", Contents: []byte("FROM scratch")},
+				{Name: "Dockerfile", Contents: []byte("FROM alpine")},
+			},
+		},
+		{
+			name: "control character path",
+			files: []bundle.ContextFile{
+				{Name: "Dockerfile", Contents: []byte("FROM scratch")},
+				{Name: "bad\nname", Contents: []byte("unsafe")},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := writeDockerfileBuildContext(io.Discard, test.files); err == nil {
+				t.Fatal("writeDockerfileBuildContext() accepted unsafe input")
+			}
+		})
+	}
+}
+
+func TestBuildContextImageUsesDockerBuildAPI(t *testing.T) {
+	var entries map[string]entry
+	client := &Client{
+		apiVersion: "1.44",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodPost || request.URL.Path != "/v1.44/build" {
+				t.Errorf("request = %s %s", request.Method, request.URL.Path)
+			}
+			if request.URL.Query().Get("t") != "preview-deployment/test:latest" || request.URL.Query().Get("dockerfile") != "Dockerfile" {
+				t.Errorf("build query = %s", request.URL.RawQuery)
+			}
+			contextBytes, err := io.ReadAll(request.Body)
+			if err != nil {
+				return nil, err
+			}
+			entries = readTarEntries(t, contextBytes)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("{\"stream\":\"ok\"}\n")),
+				Request:    request,
+			}, nil
+		})},
+	}
+	err := client.BuildContextImage(context.Background(), "preview-deployment/test:latest", []bundle.ContextFile{
+		{Name: "Dockerfile", Mode: 0o644, Contents: []byte("FROM scratch\n")},
+		{Name: "site/index.html", Mode: 0o644, Contents: []byte("ok")},
+	})
+	if err != nil {
+		t.Fatalf("BuildContextImage() error = %v", err)
+	}
+	if got := entries["site/index.html"].contents; got != "ok" {
+		t.Fatalf("site/index.html = %q", got)
 	}
 }
 
@@ -164,7 +248,7 @@ func TestCreateContainerKeepsCodexSourceReadOnlyOutsideWritableCopy(t *testing.T
 	}
 
 	id, err := client.CreateContainer(context.Background(), CreateOptions{
-		Name: "preview-test", Image: "preview:test", Port: 8080, Network: "preview-network",
+		Name: "preview-test", Image: "preview:test", WorkingDir: "/app", Port: 8080, Network: "preview-network",
 		TmpfsBytes: 64 << 20, CodexAuthPath: "/var/lib/preview/codex-auth.json",
 	})
 	if err != nil {
@@ -198,6 +282,90 @@ func TestCreateContainerKeepsCodexSourceReadOnlyOutsideWritableCopy(t *testing.T
 	if mount.Type != "bind" || mount.Source != "/var/lib/preview/codex-auth.json" || mount.Target != codexAuthSecretPath || !mount.ReadOnly {
 		t.Errorf("Codex auth mount = %+v", mount)
 	}
+}
+
+func TestCreateContainerOmitsUnsetWorkingDirectory(t *testing.T) {
+	workingDirectoryPresent := false
+	client := &Client{
+		apiVersion: "1.44",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var requestBody map[string]json.RawMessage
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				return nil, err
+			}
+			_, workingDirectoryPresent = requestBody["WorkingDir"]
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"Id":"container-id"}`)),
+				Request:    request,
+			}, nil
+		})},
+	}
+	_, err := client.CreateContainer(context.Background(), CreateOptions{
+		Name: "preview-test", Image: "preview:test", Port: 8080, Network: "preview-network", TmpfsBytes: 64 << 20,
+	})
+	if err != nil {
+		t.Fatalf("CreateContainer() error = %v", err)
+	}
+	if workingDirectoryPresent {
+		t.Fatal("unset WorkingDir was included in the container request")
+	}
+}
+
+func TestInspectImageReadsDeclaredVolumes(t *testing.T) {
+	client := &Client{
+		apiVersion: "1.44",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodGet || request.URL.Path != "/v1.44/images/preview-deployment/test:latest/json" {
+				t.Errorf("request = %s %s", request.Method, request.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"Config":{"Volumes":{"/var/lib/mysql":{}}}}`)),
+				Request:    request,
+			}, nil
+		})},
+	}
+	details, err := client.InspectImage(context.Background(), "preview-deployment/test:latest")
+	if err != nil {
+		t.Fatalf("InspectImage() error = %v", err)
+	}
+	if _, ok := details.Config.Volumes["/var/lib/mysql"]; !ok {
+		t.Fatalf("volumes = %#v", details.Config.Volumes)
+	}
+}
+
+type entry struct {
+	mode      int64
+	contents  string
+	directory bool
+}
+
+func readTarEntries(t *testing.T, contents []byte) map[string]entry {
+	t.Helper()
+	entries := make(map[string]entry)
+	reader := tar.NewReader(bytes.NewReader(contents))
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading context header: %v", err)
+		}
+		fileContents, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatalf("reading %s: %v", header.Name, err)
+		}
+		entries[header.Name] = entry{
+			mode:      header.Mode,
+			contents:  string(fileContents),
+			directory: header.Typeflag == tar.TypeDir,
+		}
+	}
+	return entries
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

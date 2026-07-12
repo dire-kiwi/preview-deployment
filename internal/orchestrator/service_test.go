@@ -2,11 +2,13 @@ package orchestrator
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dire-kiwi/preview-deployment/internal/bundle"
 	"github.com/dire-kiwi/preview-deployment/internal/config"
+	"github.com/dire-kiwi/preview-deployment/internal/docker"
 )
 
 func TestPreviewURL(t *testing.T) {
@@ -69,5 +71,35 @@ func TestEnvironmentIsSortedAndAddsPort(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("environment() = %#v, want %#v", got, want)
 		}
+	}
+}
+
+func TestWorkingDirectoryDependsOnBuildMode(t *testing.T) {
+	if got := workingDirectory(bundle.BuildExecutable); got != "/app" {
+		t.Fatalf("executable working directory = %q, want /app", got)
+	}
+	if got := workingDirectory(bundle.BuildDockerfile); got != "" {
+		t.Fatalf("Dockerfile working directory = %q, want image default", got)
+	}
+}
+
+func TestValidateImagePolicyRejectsDeclaredVolumes(t *testing.T) {
+	var details docker.ImageDetails
+	details.Config.Volumes = map[string]struct{}{
+		"/var/lib/mysql": {},
+		"/var/www/html":  {},
+	}
+	err := validateImagePolicy(details)
+	if err == nil {
+		t.Fatal("validateImagePolicy() accepted writable image volumes")
+	}
+	if got := err.Error(); !strings.Contains(got, "/var/lib/mysql, /var/www/html") {
+		t.Fatalf("validateImagePolicy() error = %q, want sorted volume paths", got)
+	}
+}
+
+func TestValidateImagePolicyAllowsImageWithoutVolumes(t *testing.T) {
+	if err := validateImagePolicy(docker.ImageDetails{}); err != nil {
+		t.Fatalf("validateImagePolicy() error = %v", err)
 	}
 }

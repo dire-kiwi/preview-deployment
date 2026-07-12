@@ -101,8 +101,16 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	containerName := "preview-" + id
 	createdAt := time.Now().UTC()
 
-	s.logger.Info("building preview image", "deployment_id", id, "image", image)
-	if err := s.docker.BuildImage(deployCtx, image, s.config.RuntimeImage, id, deploymentBundle.App); err != nil {
+	s.logger.Info("building preview image", "deployment_id", id, "image", image, "build_mode", deploymentBundle.Manifest.Build)
+	switch deploymentBundle.BuildMode {
+	case bundle.BuildExecutable:
+		err = s.docker.BuildImage(deployCtx, image, s.config.RuntimeImage, id, deploymentBundle.App)
+	case bundle.BuildDockerfile:
+		err = s.docker.BuildContextImage(deployCtx, image, deploymentBundle.Context)
+	default:
+		err = errors.New("deployment has an unsupported build mode")
+	}
+	if err != nil {
 		return Deployment{}, err
 	}
 	imageCreated := true
@@ -121,11 +129,21 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 			}
 		}
 	}
+	imageDetails, err := s.docker.InspectImage(deployCtx, image)
+	if err != nil {
+		cleanup()
+		return Deployment{}, err
+	}
+	if err := validateImagePolicy(imageDetails); err != nil {
+		cleanup()
+		return Deployment{}, err
+	}
 
 	labels := s.labels(id, image, deploymentBundle.Manifest, createdAt)
 	containerID, err = s.docker.CreateContainer(deployCtx, docker.CreateOptions{
 		Name:          containerName,
 		Image:         image,
+		WorkingDir:    workingDirectory(deploymentBundle.BuildMode),
 		Args:          append([]string(nil), deploymentBundle.Manifest.Args...),
 		Env:           environment(deploymentBundle.Manifest),
 		Labels:        labels,
@@ -346,6 +364,25 @@ func environment(manifest bundle.Manifest) []string {
 	}
 	environment = append(environment, "PORT="+strconv.Itoa(manifest.Port))
 	return environment
+}
+
+func workingDirectory(mode bundle.BuildMode) string {
+	if mode == bundle.BuildDockerfile {
+		return ""
+	}
+	return "/app"
+}
+
+func validateImagePolicy(details docker.ImageDetails) error {
+	if len(details.Config.Volumes) == 0 {
+		return nil
+	}
+	volumes := make([]string, 0, len(details.Config.Volumes))
+	for volume := range details.Config.Volumes {
+		volumes = append(volumes, volume)
+	}
+	sort.Strings(volumes)
+	return fmt.Errorf("built image declares unsupported writable volumes: %s", strings.Join(volumes, ", "))
 }
 
 func (s *Service) fromSummary(container docker.ContainerSummary) Deployment {

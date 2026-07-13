@@ -48,6 +48,11 @@ func main() {
 		logger.Warn("could not clean up orphan runtime payloads", "error", err)
 	}
 	cleanupCancel()
+	hibernationCtx, hibernationCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := service.ReconcileHibernation(hibernationCtx); err != nil {
+		logger.Warn("could not initialize preview hibernation state", "error", err)
+	}
+	hibernationCancel()
 	httpAPI := api.New(service, dockerClient, logger, cfg.MaxUploadBytes, cfg.MaxBinaryBytes, cfg.APIToken)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -56,6 +61,9 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+	signals, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	go service.RunHibernation(signals)
 
 	serverErrors := make(chan error, 1)
 	go func() {
@@ -63,12 +71,10 @@ func main() {
 			"address", cfg.ListenAddr,
 			"preview_domain", cfg.PreviewDomain,
 			"docker_network", cfg.DockerNetwork,
+			"preview_idle_timeout", cfg.PreviewIdleTimeout,
 		)
 		serverErrors <- server.ListenAndServe()
 	}()
-
-	signals, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
 
 	select {
 	case <-signals.Done():
@@ -81,6 +87,7 @@ func main() {
 		}
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
+			stopSignals()
 			logger.Error("HTTP server stopped", "error", err)
 			os.Exit(1)
 		}

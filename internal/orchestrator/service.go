@@ -29,7 +29,10 @@ const (
 	payloadLabel     = "com.preview-deployment.payload"
 	payloadHashLabel = "com.preview-deployment.payload-sha256"
 	nameLabel        = "com.preview-deployment.name"
+	hibernationLabel = "com.preview-deployment.hibernation"
+	wakeTokenLabel   = "com.preview-deployment.wake-token"
 	managedValue     = "true"
+	hibernationValue = "v1"
 	imageNamespace   = "preview-deployment"
 )
 
@@ -63,8 +66,23 @@ type Service struct {
 	logger   *slog.Logger
 	buildSem chan struct{}
 
+	activityMu          sync.Mutex
+	activity            map[string]*previewActivity
+	activityInitialized bool
+	now                 func() time.Time
+	resumeGrace         time.Duration
+	probePreview        func(context.Context, string, int) error
+
 	capacityMu sync.Mutex
 	reserved   int
+
+	lifecycleLocksMu sync.Mutex
+	lifecycleLocks   map[string]*namedLock
+}
+
+type namedLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 type dockerClient interface {
@@ -86,10 +104,15 @@ func New(dockerClient *docker.Client, cfg config.Config, logger *slog.Logger) (*
 		return nil, err
 	}
 	return &Service{
-		docker:   dockerClient,
-		config:   cfg,
-		logger:   logger,
-		buildSem: make(chan struct{}, cfg.BuildConcurrency),
+		docker:         dockerClient,
+		config:         cfg,
+		logger:         logger,
+		buildSem:       make(chan struct{}, cfg.BuildConcurrency),
+		activity:       make(map[string]*previewActivity),
+		now:            time.Now,
+		resumeGrace:    defaultPreviewResumeGrace,
+		probePreview:   probePreviewTCP,
+		lifecycleLocks: make(map[string]*namedLock),
 	}, nil
 }
 
@@ -126,6 +149,13 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	if err != nil {
 		return Deployment{}, fmt.Errorf("generate deployment ID: %w", err)
 	}
+	wakeToken := ""
+	if s.config.PreviewIdleTimeout > 0 {
+		wakeToken, err = randomHex(16)
+		if err != nil {
+			return Deployment{}, fmt.Errorf("generate preview wake token: %w", err)
+		}
+	}
 	image := ""
 	containerImage := ""
 	imageOwned := true
@@ -161,6 +191,7 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	cleanup := func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cleanupCancel()
+		s.forgetPreview(id)
 		containerGone := true
 		if containerID != "" {
 			if removeErr := s.docker.RemoveContainer(cleanupCtx, containerID); removeErr != nil && !docker.IsNotFound(removeErr) {
@@ -206,7 +237,7 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 		payloadCreated = true
 	}
 
-	labels := s.labels(id, image, imageOwned, payloadHash, deploymentBundle.Manifest, createdAt)
+	labels := s.labels(id, image, imageOwned, payloadHash, wakeToken, deploymentBundle.Manifest, createdAt)
 	containerID, err = s.docker.CreateContainer(deployCtx, docker.CreateOptions{
 		Name:          containerName,
 		Image:         containerImage,
@@ -237,6 +268,7 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 		cleanup()
 		return Deployment{}, err
 	}
+	s.markPreviewRunning(id, containerID, wakeToken, deploymentBundle.Manifest.Port)
 
 	imageCreated = false
 	payloadCreated = false
@@ -312,9 +344,12 @@ func (s *Service) Start(ctx context.Context, id string) (Deployment, error) {
 	if err != nil {
 		return Deployment{}, err
 	}
+	unlockLifecycle := s.lockPreviewLifecycle(container.Labels[idLabel])
+	defer unlockLifecycle()
 	if err := s.docker.StartContainer(ctx, container.ID); err != nil {
 		return Deployment{}, err
 	}
+	s.markPreviewRunning(container.Labels[idLabel], container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 	details, err := s.docker.InspectContainer(ctx, container.ID)
 	if err != nil {
 		return Deployment{}, err
@@ -328,9 +363,14 @@ func (s *Service) Stop(ctx context.Context, id string) (Deployment, error) {
 	if err != nil {
 		return Deployment{}, err
 	}
+	unlockLifecycle := s.lockPreviewLifecycle(container.Labels[idLabel])
+	defer unlockLifecycle()
+	s.markPreviewStopping(container.Labels[idLabel], container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 	if err := s.docker.StopContainer(ctx, container.ID, s.config.StopTimeout); err != nil {
+		s.markPreviewRunning(container.Labels[idLabel], container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 		return Deployment{}, err
 	}
+	s.markPreviewStopped(container.Labels[idLabel], container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 	details, err := s.docker.InspectContainer(ctx, container.ID)
 	if err != nil {
 		return Deployment{}, err
@@ -351,16 +391,22 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		}
 		return err
 	}
+	unlockLifecycle := s.lockPreviewLifecycle(id)
+	defer unlockLifecycle()
+	s.markPreviewDeleting(id, container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 	image := container.Labels[imageLabel]
 	if image == "" {
 		image = container.Image
 	}
 	if err := s.docker.StopContainer(ctx, container.ID, s.config.StopTimeout); err != nil && !docker.IsNotFound(err) {
+		s.markPreviewRunning(id, container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 		return err
 	}
 	if err := s.docker.RemoveContainer(ctx, container.ID); err != nil && !docker.IsNotFound(err) {
+		s.markPreviewStopped(id, container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 		return err
 	}
+	s.forgetPreview(id)
 	imageOwned := container.Labels[imageOwnedLabel] != "false"
 	if container.Labels[payloadLabel] == id+".zip" {
 		if err := removePayload(s.config.PayloadDir, id); err != nil {
@@ -423,7 +469,32 @@ func (s *Service) find(ctx context.Context, id string) (docker.ContainerSummary,
 	return containers[0], nil
 }
 
-func (s *Service) labels(id, image string, imageOwned bool, payloadHash string, manifest bundle.Manifest, createdAt time.Time) map[string]string {
+func (s *Service) lockPreviewLifecycle(id string) func() {
+	s.lifecycleLocksMu.Lock()
+	if s.lifecycleLocks == nil {
+		s.lifecycleLocks = make(map[string]*namedLock)
+	}
+	lock := s.lifecycleLocks[id]
+	if lock == nil {
+		lock = &namedLock{}
+		s.lifecycleLocks[id] = lock
+	}
+	lock.refs++
+	s.lifecycleLocksMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		s.lifecycleLocksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(s.lifecycleLocks, id)
+		}
+		s.lifecycleLocksMu.Unlock()
+	}
+}
+
+func (s *Service) labels(id, image string, imageOwned bool, payloadHash, wakeToken string, manifest bundle.Manifest, createdAt time.Time) map[string]string {
 	router := "preview-" + id
 	labels := map[string]string{
 		managedLabel:    managedValue,
@@ -447,6 +518,15 @@ func (s *Service) labels(id, image string, imageOwned bool, payloadHash string, 
 	}
 	if s.config.PublicScheme == "https" {
 		labels["traefik.http.routers."+router+".tls"] = "true"
+	}
+	if s.config.PreviewIdleTimeout > 0 && validWakeToken(wakeToken) {
+		middleware := router + "-wake"
+		labels[hibernationLabel] = hibernationValue
+		labels[wakeTokenLabel] = wakeToken
+		labels["traefik.docker.allownonrunning"] = "true"
+		labels["traefik.http.middlewares."+middleware+".forwardauth.address"] = "http://orchestrator:8080/internal/previews/" + id + "/activity?token=" + wakeToken
+		labels["traefik.http.middlewares."+middleware+".forwardauth.trustForwardHeader"] = "false"
+		labels["traefik.http.routers."+router+".middlewares"] = middleware + "@docker"
 	}
 	return labels
 }
@@ -562,7 +642,11 @@ func (s *Service) previewURL(id string) string {
 }
 
 func randomID() (string, error) {
-	bytes := make([]byte, 6)
+	return randomHex(6)
+}
+
+func randomHex(size int) (string, error) {
+	bytes := make([]byte, size)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}

@@ -35,6 +35,9 @@ type Config struct {
 	DeployTimeout    time.Duration
 	StopTimeout      time.Duration
 
+	PreviewIdleTimeout       time.Duration
+	PreviewIdleCheckInterval time.Duration
+
 	PreviewMemoryBytes int64
 	PreviewNanoCPUs    int64
 	PreviewPIDs        int64
@@ -44,18 +47,20 @@ type Config struct {
 // Load reads configuration from environment variables and validates it.
 func Load() (Config, error) {
 	cfg := Config{
-		ListenAddr:        envOr("LISTEN_ADDR", ":8080"),
-		APIToken:          envOr("API_TOKEN", ""),
-		DockerSocket:      envOr("DOCKER_SOCKET", "/var/run/docker.sock"),
-		DockerNetwork:     envOr("DOCKER_NETWORK", "preview-network"),
-		PreviewDomain:     strings.ToLower(envOr("PREVIEW_DOMAIN", "localhost")),
-		PublicScheme:      strings.ToLower(envOr("PUBLIC_SCHEME", "http")),
-		RuntimeImage:      envOr("RUNTIME_IMAGE", "debian:bookworm-slim"),
-		TraefikEntrypoint: envOr("TRAEFIK_ENTRYPOINT", "web"),
-		CodexAuthPath:     strings.TrimSpace(envOr("CODEX_AUTH_PATH", "")),
-		PayloadDir:        strings.TrimSpace(envOr("PAYLOAD_DIR", "/var/lib/preview-deployment/payloads")),
-		DeployTimeout:     10 * time.Minute,
-		StopTimeout:       10 * time.Second,
+		ListenAddr:               envOr("LISTEN_ADDR", ":8080"),
+		APIToken:                 envOr("API_TOKEN", ""),
+		DockerSocket:             envOr("DOCKER_SOCKET", "/var/run/docker.sock"),
+		DockerNetwork:            envOr("DOCKER_NETWORK", "preview-network"),
+		PreviewDomain:            strings.ToLower(envOr("PREVIEW_DOMAIN", "localhost")),
+		PublicScheme:             strings.ToLower(envOr("PUBLIC_SCHEME", "http")),
+		RuntimeImage:             envOr("RUNTIME_IMAGE", "debian:bookworm-slim"),
+		TraefikEntrypoint:        envOr("TRAEFIK_ENTRYPOINT", "web"),
+		CodexAuthPath:            strings.TrimSpace(envOr("CODEX_AUTH_PATH", "")),
+		PayloadDir:               strings.TrimSpace(envOr("PAYLOAD_DIR", "/var/lib/preview-deployment/payloads")),
+		DeployTimeout:            10 * time.Minute,
+		StopTimeout:              10 * time.Second,
+		PreviewIdleTimeout:       0,
+		PreviewIdleCheckInterval: 30 * time.Second,
 	}
 
 	var err error
@@ -80,6 +85,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.DeployTimeout, err = durationEnv("DEPLOY_TIMEOUT", cfg.DeployTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.PreviewIdleTimeout, err = nonNegativeDurationEnv("PREVIEW_IDLE_TIMEOUT", cfg.PreviewIdleTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.PreviewIdleCheckInterval, err = durationEnv("PREVIEW_IDLE_CHECK_INTERVAL", cfg.PreviewIdleCheckInterval); err != nil {
 		return Config{}, err
 	}
 	stopSeconds, err := intEnv("STOP_TIMEOUT_SECONDS", 10, 0, 300)
@@ -210,6 +221,15 @@ func durationEnv(key string, fallback time.Duration) (time.Duration, error) {
 	d, err := time.ParseDuration(value)
 	if err != nil || d <= 0 {
 		return 0, fmt.Errorf("%s must be a positive duration (for example, 10m)", key)
+	}
+	return d, nil
+}
+
+func nonNegativeDurationEnv(key string, fallback time.Duration) (time.Duration, error) {
+	value := envOr(key, fallback.String())
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative duration (for example, 30m; 0 disables)", key)
 	}
 	return d, nil
 }

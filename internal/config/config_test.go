@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestValidHostname(t *testing.T) {
 	valid := []string{"localhost", "preview.example.test", "a-b.example"}
@@ -33,6 +38,63 @@ func TestLoadReadsAPIToken(t *testing.T) {
 	}
 	if cfg.APIToken != "test-secret" {
 		t.Fatalf("APIToken = %q, want test-secret", cfg.APIToken)
+	}
+}
+
+func TestLoadReadsPreviewHibernationDurations(t *testing.T) {
+	t.Setenv("PREVIEW_IDLE_TIMEOUT", "45m")
+	t.Setenv("PREVIEW_IDLE_CHECK_INTERVAL", "12s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreviewIdleTimeout != 45*time.Minute || cfg.PreviewIdleCheckInterval != 12*time.Second {
+		t.Fatalf("idle durations = %s / %s", cfg.PreviewIdleTimeout, cfg.PreviewIdleCheckInterval)
+	}
+}
+
+func TestLoadAllowsDisabledPreviewHibernation(t *testing.T) {
+	t.Setenv("PREVIEW_IDLE_TIMEOUT", "0")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreviewIdleTimeout != 0 {
+		t.Fatalf("PreviewIdleTimeout = %s, want 0", cfg.PreviewIdleTimeout)
+	}
+}
+
+func TestLoadDefaultsPreviewHibernationOffWithoutStackConfiguration(t *testing.T) {
+	t.Setenv("PREVIEW_IDLE_TIMEOUT", "temporary")
+	if err := os.Unsetenv("PREVIEW_IDLE_TIMEOUT"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreviewIdleTimeout != 0 {
+		t.Fatalf("PreviewIdleTimeout = %s, want disabled fallback", cfg.PreviewIdleTimeout)
+	}
+}
+
+func TestLoadRejectsInvalidPreviewHibernationDurations(t *testing.T) {
+	for _, test := range []struct {
+		key   string
+		value string
+	}{
+		{key: "PREVIEW_IDLE_TIMEOUT", value: "-1s"},
+		{key: "PREVIEW_IDLE_TIMEOUT", value: "later"},
+		{key: "PREVIEW_IDLE_CHECK_INTERVAL", value: "0"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			t.Setenv(test.key, test.value)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), test.key) {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
 	}
 }
 

@@ -60,6 +60,7 @@ func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", a.dashboard)
 	mux.HandleFunc("GET /healthz", a.health)
+	mux.HandleFunc("GET /internal/previews/{id}/activity", a.previewActivity)
 	mux.HandleFunc("GET /v1/deployments", a.listDeployments)
 	mux.HandleFunc("POST /v1/deployments", a.createDeployment)
 	mux.HandleFunc("GET /v1/deployments/{id}", a.getDeployment)
@@ -68,6 +69,65 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/deployments/{id}/stop", a.stopDeployment)
 	mux.HandleFunc("GET /v1/deployments/{id}/logs", a.deploymentLogs)
 	return a.recover(a.logRequests(a.authenticate(mux)))
+}
+
+func (a *API) previewActivity(w http.ResponseWriter, r *http.Request) {
+	result, err := a.service.ObservePreviewRequest(r.Context(), r.PathValue("id"), r.URL.Query().Get("token"))
+	if errors.Is(err, orchestrator.ErrNotFound) {
+		http.Error(w, "preview not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		a.logger.Warn("could not resume preview after request", "deployment_id", r.PathValue("id"), "error", err)
+		writeResumePage(w, time.Second)
+		return
+	}
+	if result.Ready {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeResumePage(w, result.RetryAfter)
+}
+
+func writeResumePage(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = io.WriteString(w, `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="refresh" content="2">
+  <title>Resuming preview…</title>
+  <style>
+    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b1020; color: #eef2ff; }
+    main { width: min(32rem, calc(100% - 2rem)); padding: 2.5rem; text-align: center; border: 1px solid #26304d; border-radius: 1.25rem; background: #121a30; box-shadow: 0 1.5rem 4rem #02061780; }
+    .spinner { width: 2.75rem; height: 2.75rem; margin: 0 auto 1.5rem; border: .3rem solid #334155; border-top-color: #818cf8; border-radius: 999px; animation: spin .9s linear infinite; }
+    h1 { margin: 0 0 .75rem; font-size: clamp(1.5rem, 5vw, 2rem); letter-spacing: -.025em; }
+    p { margin: 0; color: #a5b4cf; line-height: 1.6; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; border-top-color: #334155; } }
+  </style>
+</head>
+<body>
+  <main aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <h1>Resuming this preview…</h1>
+    <p>It was paused while idle to save resources. This page will retry automatically.</p>
+  </main>
+</body>
+</html>`)
 }
 
 func (a *API) authenticate(next http.Handler) http.Handler {
@@ -366,12 +426,14 @@ func (a *API) logRequests(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		a.logger.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", status,
-			"duration_ms", time.Since(started).Milliseconds(),
-		)
+		if !strings.HasPrefix(r.URL.Path, "/internal/previews/") {
+			a.logger.Info("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", status,
+				"duration_ms", time.Since(started).Milliseconds(),
+			)
+		}
 	})
 }
 

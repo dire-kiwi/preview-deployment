@@ -1,7 +1,7 @@
 COMPOSE := docker compose
 DEV_COMPOSE := $(COMPOSE) -f compose.yaml -f compose.dev.yaml
 
-.PHONY: up up-release pull down logs test example-zip deploy-example clean
+.PHONY: up up-release pull down logs test test-hibernation example-zip deploy-example clean
 
 up:
 	$(DEV_COMPOSE) up --build -d
@@ -20,6 +20,9 @@ logs:
 
 test:
 	go test ./...
+
+test-hibernation:
+	./scripts/test-hibernation.sh
 
 example-zip:
 	mkdir -p dist

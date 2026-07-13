@@ -46,7 +46,7 @@ func TestLabelsConfigureTraefik(t *testing.T) {
 		},
 		logger: slog.Default(),
 	}
-	labels := service.labels("abc123abc123", "preview/image:latest", true, "", bundle.Manifest{Port: 9090}, time.Unix(1, 0).UTC())
+	labels := service.labels("abc123abc123", "preview/image:latest", true, "", "", bundle.Manifest{Port: 9090}, time.Unix(1, 0).UTC())
 	if got := labels["traefik.http.routers.preview-abc123abc123.rule"]; got != "Host(`abc123abc123.preview.example.test`)" {
 		t.Fatalf("router rule = %q", got)
 	}
@@ -62,7 +62,7 @@ func TestLabelsEnableTLSForHTTPS(t *testing.T) {
 		TraefikEntrypoint: "websecure",
 		PublicScheme:      "https",
 	}}
-	labels := service.labels("abc123abc123", "preview/image:latest", true, "", bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
+	labels := service.labels("abc123abc123", "preview/image:latest", true, "", "", bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
 	if got := labels["traefik.http.routers.preview-abc123abc123.tls"]; got != "true" {
 		t.Fatalf("TLS label = %q, want true", got)
 	}
@@ -308,6 +308,7 @@ type fakeDockerClient struct {
 	inspectImage         func(context.Context, string) (docker.ImageDetails, error)
 	createContainer      func(context.Context, docker.CreateOptions) (string, error)
 	startContainer       func(context.Context, string) error
+	stopContainer        func(context.Context, string, time.Duration) error
 	inspectContainer     func(context.Context, string) (docker.ContainerDetails, error)
 	listContainers       func(context.Context, map[string]string) ([]docker.ContainerSummary, error)
 	removeContainer      func(context.Context, string) error
@@ -348,7 +349,12 @@ func (f *fakeDockerClient) StartContainer(ctx context.Context, id string) error 
 	return nil
 }
 
-func (f *fakeDockerClient) StopContainer(context.Context, string, time.Duration) error { return nil }
+func (f *fakeDockerClient) StopContainer(ctx context.Context, id string, timeout time.Duration) error {
+	if f.stopContainer != nil {
+		return f.stopContainer(ctx, id, timeout)
+	}
+	return nil
+}
 
 func (f *fakeDockerClient) RemoveContainer(ctx context.Context, id string) error {
 	f.removeContainerCalls++

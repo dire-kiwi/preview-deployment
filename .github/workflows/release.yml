@@ -32,8 +32,11 @@ jobs:
       - name: Build commands
         run: go build ./...
 
+      - name: Test request-driven hibernation
+        run: make test-hibernation
+
       - name: Check installer syntax
-        run: sh -n scripts/install-cli.sh scripts/install-stack.sh
+        run: sh -n scripts/install-cli.sh scripts/install-stack.sh scripts/test-hibernation.sh
 
   publish-image:
     needs: test

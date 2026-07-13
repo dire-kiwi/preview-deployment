@@ -34,7 +34,6 @@ Local endpoints use loopback by default:
 |---|---|
 | Orchestrator API | `http://127.0.0.1:8081` or `http://api.localhost` |
 | Preview traffic | `http://<deployment-id>.localhost` |
-| Traefik dashboard | `http://127.0.0.1:8082` |
 
 Check the installation with:
 
@@ -279,6 +278,63 @@ curl --fail-with-body -H 'Content-Type: application/zip' \
 
 Deploy success means Docker started the container; it does not guarantee that the uploaded application is ready to serve traffic.
 
+## Preview hibernation
+
+Running previews are stopped after 30 minutes without an HTTP request through
+Traefik. Their containers and images remain in place. The first request after
+hibernation starts the same container and receives a retryable `503` page that
+says the preview is resuming; the page refreshes automatically and normal
+Traefik routing takes over after a short startup grace period and the
+application port is accepting connections.
+
+Hibernation is a Docker stop/start cycle, not process checkpointing. Processes
+and in-memory state are lost, and the preview's tmpfs-backed `/tmp` and
+`/home/preview` filesystems start empty after every resume. Store anything that
+must survive hibernation outside those ephemeral locations. Set the global
+`PREVIEW_IDLE_TIMEOUT=0` before deploying a preview when stop/start semantics
+are unsuitable; per-preview opt-out is not currently supported.
+
+Traefik provides the stopped-container routing hook, while the orchestrator
+owns request tracking and Docker start/stop operations. Wake callbacks carry a
+random per-preview control token, and the supplied stack does not expose
+Traefik's diagnostic API where dynamic labels could reveal those tokens. A
+manual `previewctl stop` is also temporary: the next routed request resumes
+that preview.
+
+The stopped-container hook requires Traefik 3.6 or newer; the supplied Compose
+file pins a compatible release. Because ForwardAuth observes every request,
+otherwise healthy previews temporarily depend on the orchestrator being
+available.
+
+Configure the behavior with `PREVIEW_IDLE_TIMEOUT` (the supplied stack defaults
+to `30m`) and `PREVIEW_IDLE_CHECK_INTERVAL` (default `30s`). Set
+`PREVIEW_IDLE_TIMEOUT=0` to disable both automatic hibernation and
+request-triggered resume middleware for newly deployed previews. Existing
+containers keep their original immutable Traefik labels. Legacy containers are
+never stopped by the hibernator because they have no safe wake route; redeploy
+them to opt in.
+
+Upgrade with the complete released Compose stack, not by changing only the
+orchestrator image tag. The binary deliberately defaults hibernation off when
+`PREVIEW_IDLE_TIMEOUT` is absent, so an image-only upgrade remains safe, but it
+does not remove the older stack's diagnostic Traefik API or enable hibernation.
+
+The cold request itself is not replayed. Browsers safely refresh `GET` pages,
+but clients sending a cold `POST`, `PUT`, or other non-idempotent request must
+retry after the `503` response. ForwardAuth observes a WebSocket, SSE, or other
+long-lived connection only when it is opened; use a conservative timeout or
+disable hibernation globally when connections may remain quiet longer than the
+idle timeout. An orchestrator restart gives already-running previews a
+fresh idle interval because last-request times are intentionally kept in
+memory rather than in a database.
+
+Downgrading to a release before request-driven hibernation requires recreating
+previews deployed by this release. Their immutable Traefik labels reference the
+new orchestrator wake callback, which older orchestrators do not serve; without
+redeployment, those preview routes return `404` after a rollback even when the
+containers are running. Pre-existing legacy previews do not have this label and
+are unaffected.
+
 ## Local development
 
 Requirements: Docker with Compose and Go 1.24 or newer.
@@ -287,9 +343,16 @@ Requirements: Docker with Compose and Go 1.24 or newer.
 make up
 make test
 make deploy-example
+make test-hibernation
 ```
 
 `make up` layers `compose.dev.yaml` over the release Compose file and builds the orchestrator locally. `make logs` follows platform logs. Delete preview deployments before `make down`, because their containers remain attached to the shared `preview-network`.
+
+`make test-hibernation` starts a disposable privileged Docker-in-Docker daemon,
+then builds an isolated local image and runs real Traefik, orchestrator,
+legacy-preview, and preview containers inside it. It verifies keepalive traffic,
+idle stop, the `503` resume page, same-container restart, readiness, and a second
+idle cycle, then removes the disposable daemon and all of its resources.
 
 ## Configuration
 
@@ -299,6 +362,8 @@ Copy `.env.example` when running from a source checkout. Common settings are:
 - `PREVIEW_DOMAIN`: suffix used for preview hostnames.
 - `TRAEFIK_HTTP_PORT` and `PUBLIC_PORT`: listening and advertised ports; keep them equal.
 - `MAX_DEPLOYMENTS`, `MAX_UPLOAD_MB`, and `BUILD_CONCURRENCY`: platform capacity controls.
+- `PREVIEW_IDLE_TIMEOUT`: request-free duration before a preview is stopped;
+  `0` disables hibernation. `PREVIEW_IDLE_CHECK_INTERVAL` controls scan frequency.
 - `PREVIEW_MEMORY_MB`, `PREVIEW_CPUS`, `PREVIEW_PIDS_LIMIT`, and `PREVIEW_TMPFS_MB`: per-preview limits.
 - `CODEX_AUTH_PATH`: optional absolute host path mounted read-only only for
   manifests that explicitly request `codex_auth`.
@@ -319,4 +384,4 @@ and working directory but cannot declare volumes. Runtime payloads use the
 managed read-only file bind described above; the only user-selectable host mount
 is the explicit read-only Codex auth opt-in described above.
 
-The platform still executes uploaded code. The orchestrator's Docker socket access is effectively host-root access even though the socket mount is read-only. Before allowing untrusted users or remote traffic, use a dedicated host or isolated Docker daemon, terminate TLS, set `API_TOKEN`, restrict egress, protect the Traefik dashboard, and consider a tightly scoped Docker socket proxy. Preview filesystems are ephemeral; application data and volumes are not persisted.
+The platform still executes uploaded code. The orchestrator's Docker socket access is effectively host-root access even though the socket mount is read-only. Before allowing untrusted users or remote traffic, use a dedicated host or isolated Docker daemon, terminate TLS, set `API_TOKEN`, restrict egress, and consider a tightly scoped Docker socket proxy. Preview filesystems are ephemeral; application data and volumes are not persisted.

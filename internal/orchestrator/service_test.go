@@ -1,15 +1,21 @@
 package orchestrator
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	assetstore "github.com/dire-kiwi/preview-deployment/internal/assets"
 	"github.com/dire-kiwi/preview-deployment/internal/bundle"
 	"github.com/dire-kiwi/preview-deployment/internal/config"
 	"github.com/dire-kiwi/preview-deployment/internal/docker"
@@ -46,7 +52,7 @@ func TestLabelsConfigureTraefik(t *testing.T) {
 		},
 		logger: slog.Default(),
 	}
-	labels := service.labels("abc123abc123", "preview/image:latest", true, "", "", bundle.Manifest{Port: 9090}, time.Unix(1, 0).UTC())
+	labels := service.labels("abc123abc123", "preview/image:latest", true, "", "", "", bundle.Manifest{Port: 9090}, time.Unix(1, 0).UTC())
 	if got := labels["traefik.http.routers.preview-abc123abc123.rule"]; got != "Host(`abc123abc123.preview.example.test`)" {
 		t.Fatalf("router rule = %q", got)
 	}
@@ -62,14 +68,14 @@ func TestLabelsEnableTLSForHTTPS(t *testing.T) {
 		TraefikEntrypoint: "websecure",
 		PublicScheme:      "https",
 	}}
-	labels := service.labels("abc123abc123", "preview/image:latest", true, "", "", bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
+	labels := service.labels("abc123abc123", "preview/image:latest", true, "", "", "", bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
 	if got := labels["traefik.http.routers.preview-abc123abc123.tls"]; got != "true" {
 		t.Fatalf("TLS label = %q, want true", got)
 	}
 }
 
 func TestEnvironmentIsSortedAndAddsPort(t *testing.T) {
-	got := environment(bundle.Manifest{Port: 9090, Env: map[string]string{"Z": "last", "A": "first"}})
+	got := environment(bundle.Manifest{Port: 9090, Env: map[string]string{"Z": "last", "A": "first"}}, false)
 	want := []string{"A=first", "Z=last", "PORT=9090"}
 	for index := range want {
 		if got[index] != want[index] {
@@ -284,10 +290,118 @@ func TestValidateImagePolicyAllowsImageWithoutVolumes(t *testing.T) {
 	}
 }
 
+func TestDeployWithAssetsCopiesSnapshotBeforeStart(t *testing.T) {
+	var events []string
+	var copied bytes.Buffer
+	var options docker.CreateOptions
+	fake := &fakeDockerClient{}
+	fake.createContainer = func(_ context.Context, got docker.CreateOptions) (string, error) {
+		events = append(events, "create")
+		options = got
+		return "container-id", nil
+	}
+	fake.copyArchiveToContainer = func(_ context.Context, id, destination string, archive io.Reader) error {
+		events = append(events, "copy")
+		if id != "container-id" || destination != "/home/preview" {
+			t.Fatalf("copy target = %q %q", id, destination)
+		}
+		_, err := io.Copy(&copied, archive)
+		return err
+	}
+	fake.startContainer = func(context.Context, string) error {
+		events = append(events, "start")
+		return nil
+	}
+	fake.inspectContainer = func(_ context.Context, id string) (docker.ContainerDetails, error) {
+		var details docker.ContainerDetails
+		details.ID = id
+		details.Config.Labels = options.Labels
+		details.State.Status = "running"
+		return details, nil
+	}
+	service := testService(t, fake)
+	upload := filepath.Join(t.TempDir(), "assets.zip")
+	file, err := os.Create(upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	entry, err := archive.Create("database/site.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(entry, "database")
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReplaceAssets(context.Background(), "customer-one", upload); err != nil {
+		t.Fatal(err)
+	}
+
+	deployment, err := service.DeployWithAssets(context.Background(), bundle.Bundle{
+		BuildMode: bundle.BuildExecutable,
+		App:       []byte("test"),
+		Manifest:  bundle.Manifest{Port: 8080},
+	}, "customer-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(events, ","); got != "create,copy,start" {
+		t.Fatalf("events = %q", got)
+	}
+	if deployment.AssetID != "customer-one" || options.Labels[assetIDLabel] != "customer-one" {
+		t.Fatalf("asset metadata = %#v / %#v", deployment, options.Labels)
+	}
+	if !slices.Contains(options.Env, "PREVIEW_ASSETS_DIR=/home/preview/assets") {
+		t.Fatalf("environment = %#v", options.Env)
+	}
+	reader := tar.NewReader(bytes.NewReader(copied.Bytes()))
+	found := false
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Name == "assets/database/site.db" {
+			contents, _ := io.ReadAll(reader)
+			found = string(contents) == "database"
+		}
+	}
+	if !found {
+		t.Fatal("copied tar did not contain the uploaded database")
+	}
+}
+
+func TestDeployWithAssetsRejectsMissingSnapshotBeforeBuilding(t *testing.T) {
+	fake := &fakeDockerClient{}
+	service := testService(t, fake)
+	_, err := service.DeployWithAssets(context.Background(), bundle.Bundle{
+		BuildMode: bundle.BuildExecutable,
+		App:       []byte("test"),
+		Manifest:  bundle.Manifest{Port: 8080},
+	}, "missing")
+	if !errors.Is(err, ErrAssetsNotFound) {
+		t.Fatalf("DeployWithAssets() error = %v, want ErrAssetsNotFound", err)
+	}
+	if fake.buildImageCalls != 0 {
+		t.Fatalf("BuildImage calls = %d, want 0", fake.buildImageCalls)
+	}
+}
+
 func testService(t *testing.T, client dockerClient) *Service {
 	t.Helper()
 	payloadDir := t.TempDir()
 	if err := os.Chmod(payloadDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	assetStore, err := assetstore.NewStore(filepath.Join(t.TempDir(), "assets"), 1<<20)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return &Service{
@@ -301,21 +415,23 @@ func testService(t *testing.T, client dockerClient) *Service {
 		},
 		logger:   slog.Default(),
 		buildSem: make(chan struct{}, 1),
+		assets:   assetStore,
 	}
 }
 
 type fakeDockerClient struct {
-	inspectImage         func(context.Context, string) (docker.ImageDetails, error)
-	createContainer      func(context.Context, docker.CreateOptions) (string, error)
-	startContainer       func(context.Context, string) error
-	stopContainer        func(context.Context, string, time.Duration) error
-	inspectContainer     func(context.Context, string) (docker.ContainerDetails, error)
-	listContainers       func(context.Context, map[string]string) ([]docker.ContainerSummary, error)
-	removeContainer      func(context.Context, string) error
-	buildImageCalls      int
-	buildContextCalls    int
-	removeContainerCalls int
-	removeImageCalls     int
+	inspectImage           func(context.Context, string) (docker.ImageDetails, error)
+	createContainer        func(context.Context, docker.CreateOptions) (string, error)
+	startContainer         func(context.Context, string) error
+	stopContainer          func(context.Context, string, time.Duration) error
+	inspectContainer       func(context.Context, string) (docker.ContainerDetails, error)
+	listContainers         func(context.Context, map[string]string) ([]docker.ContainerSummary, error)
+	removeContainer        func(context.Context, string) error
+	buildImageCalls        int
+	buildContextCalls      int
+	removeContainerCalls   int
+	removeImageCalls       int
+	copyArchiveToContainer func(context.Context, string, string, io.Reader) error
 }
 
 func (f *fakeDockerClient) BuildImage(context.Context, string, string, string, []byte) error {
@@ -340,6 +456,13 @@ func (f *fakeDockerClient) CreateContainer(ctx context.Context, options docker.C
 		return f.createContainer(ctx, options)
 	}
 	return "container-id", nil
+}
+
+func (f *fakeDockerClient) CopyArchiveToContainer(ctx context.Context, id, destination string, archive io.Reader) error {
+	if f.copyArchiveToContainer != nil {
+		return f.copyArchiveToContainer(ctx, id, destination, archive)
+	}
+	return nil
 }
 
 func (f *fakeDockerClient) StartContainer(ctx context.Context, id string) error {

@@ -25,7 +25,7 @@ func TestLabelsConfigureRequestDrivenHibernation(t *testing.T) {
 		TraefikEntrypoint:  "web",
 		PreviewIdleTimeout: time.Minute,
 	}}
-	labels := service.labels("abc123abc123", "preview/image:latest", true, "", testWakeToken, bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
+	labels := service.labels("abc123abc123", "preview/image:latest", true, "", testWakeToken, "", bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
 	router := "traefik.http.routers.preview-abc123abc123"
 	wake := "traefik.http.middlewares.preview-abc123abc123-wake.forwardauth"
 	if got := labels["traefik.docker.allownonrunning"]; got != "true" {
@@ -49,7 +49,7 @@ func TestLabelsDoNotEnableHibernationWhenDisabled(t *testing.T) {
 	service := &Service{config: config.Config{
 		PreviewDomain: "preview.example.test", DockerNetwork: "preview-network", TraefikEntrypoint: "web",
 	}}
-	labels := service.labels("abc123abc123", "preview/image:latest", true, "", "", bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
+	labels := service.labels("abc123abc123", "preview/image:latest", true, "", "", "", bundle.Manifest{Port: 8080}, time.Unix(1, 0).UTC())
 	if labels[hibernationLabel] != "" || labels["traefik.docker.allownonrunning"] != "" {
 		t.Fatalf("disabled hibernation labels = %#v", labels)
 	}

@@ -133,6 +133,35 @@ func TestReceiveArchiveRawZIP(t *testing.T) {
 	defer os.Remove(filename)
 }
 
+func TestReceiveAssetArchiveAcceptsGzip(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPut, "/v1/assets/site", bytes.NewReader([]byte{0x1f, 0x8b, 0x08, 0x00}))
+	request.Header.Set("Content-Type", "application/gzip")
+	filename, err := receiveUpload(httptest.NewRecorder(), request, 1024, true)
+	if err != nil {
+		t.Fatalf("receiveUpload() error = %v", err)
+	}
+	defer os.Remove(filename)
+
+	deploymentRequest := httptest.NewRequest(http.MethodPost, "/v1/deployments", bytes.NewReader([]byte{0x1f, 0x8b}))
+	deploymentRequest.Header.Set("Content-Type", "application/gzip")
+	if _, err := receiveArchive(httptest.NewRecorder(), deploymentRequest, 1024); !errors.Is(err, errUnsupportedMediaType) {
+		t.Fatalf("receiveArchive(gzip) error = %v, want unsupported media type", err)
+	}
+}
+
+func TestAssetRoutesRejectUnsafeIDsBeforeReadingUpload(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := New(nil, nil, logger, 1024, 1024, "").Handler()
+	request := httptest.NewRequest(http.MethodPut, "/v1/assets/UPPER", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
 func TestReceiveArchiveEnforcesLimit(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/deployments", bytes.NewReader(make([]byte, 11)))
 	request.Header.Set("Content-Type", "application/zip")

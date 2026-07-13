@@ -61,6 +61,44 @@ func TestClientLifecycleRequests(t *testing.T) {
 	}
 }
 
+func TestClientUploadsAssetsAndLinksThemToDeployment(t *testing.T) {
+	directory := t.TempDir()
+	assetPath := filepath.Join(directory, "latest.tar.gz")
+	if err := os.WriteFile(assetPath, []byte("gzip archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deploymentPath := filepath.Join(directory, "deployment.zip")
+	if err := os.WriteFile(deploymentPath, []byte("zip archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/assets/customer-one":
+			if r.Header.Get("Content-Type") != "application/gzip" {
+				t.Errorf("asset Content-Type = %q", r.Header.Get("Content-Type"))
+			}
+			writeTestJSON(w, http.StatusOK, map[string]any{"id": "customer-one", "size": 42, "sha256": strings.Repeat("a", 64), "updated_at": time.Now()})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/deployments" && r.URL.Query().Get("asset_id") == "customer-one":
+			writeTestJSON(w, http.StatusCreated, map[string]any{"id": "0123456789ab", "asset_id": "customer-one", "status": "running"})
+		default:
+			http.Error(w, "unexpected route", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "", "test", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := client.UploadAssets(context.Background(), "customer-one", assetPath)
+	if err != nil || snapshot.ID != "customer-one" {
+		t.Fatalf("UploadAssets() = %#v, %v", snapshot, err)
+	}
+	deployment, err := client.DeployWithAssets(context.Background(), deploymentPath, "customer-one")
+	if err != nil || deployment.AssetID != "customer-one" {
+		t.Fatalf("DeployWithAssets() = %#v, %v", deployment, err)
+	}
+}
+
 func TestClientDecodesStructuredAndPlainErrors(t *testing.T) {
 	tests := []struct {
 		name        string

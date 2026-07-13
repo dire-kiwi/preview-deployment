@@ -48,6 +48,7 @@ func TestInternalActivityRejectsMissingControlToken(t *testing.T) {
 	service, err := orchestrator.New(docker.New(filepath.Join(t.TempDir(), "unused-docker.sock")), config.Config{
 		PayloadDir:       payloadDir,
 		BuildConcurrency: 1,
+		MaxBinaryBytes:   1024,
 	}, logger)
 	if err != nil {
 		t.Fatal(err)

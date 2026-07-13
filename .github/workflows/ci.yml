@@ -43,7 +43,10 @@ jobs:
         run: make test-hibernation
 
       - name: Check installer syntax
-        run: sh -n scripts/install-cli.sh scripts/install-stack.sh scripts/test-hibernation.sh
+        run: sh -n scripts/install-cli.sh scripts/install-stack.sh scripts/test-install-stack-bootstrap.sh scripts/test-hibernation.sh
+
+      - name: Test stack bootstrap delegation
+        run: scripts/test-install-stack-bootstrap.sh
 
       - name: Validate production Compose file
         env:

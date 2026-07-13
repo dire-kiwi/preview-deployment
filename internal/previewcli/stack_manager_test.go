@@ -24,16 +24,21 @@ type stackCommandRecord struct {
 }
 
 type fakeStackRunner struct {
-	mu                  sync.Mutex
-	records             []stackCommandRecord
-	platformVersion     string
-	platformFiles       []string
-	orchestratorExists  bool
-	previews            map[string]managedPreviewInvariant
-	failHealthVersion   string
-	mismatchImageOnce   bool
-	mismatchVersion     string
-	originalPreviewCopy map[string]managedPreviewInvariant
+	mu                   sync.Mutex
+	records              []stackCommandRecord
+	platformVersion      string
+	platformFiles        []string
+	orchestratorExists   bool
+	previews             map[string]managedPreviewInvariant
+	failHealthVersion    string
+	blockHealthProbe     bool
+	probesBeforeBlock    int
+	healthProbeCount     int
+	healthStartingCount  int
+	healthAlwaysStarting bool
+	mismatchImageOnce    bool
+	mismatchVersion      string
+	originalPreviewCopy  map[string]managedPreviewInvariant
 }
 
 func newFakeStackRunner(version string, files []string) *fakeStackRunner {
@@ -54,7 +59,7 @@ func newFakeStackRunner(version string, files []string) *fakeStackRunner {
 	}
 }
 
-func (f *fakeStackRunner) Run(_ context.Context, name string, args []string, env map[string]string) ([]byte, error) {
+func (f *fakeStackRunner) Run(ctx context.Context, name string, args []string, env map[string]string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.records = append(f.records, stackCommandRecord{name: name, args: append([]string(nil), args...), env: cloneStringMap(env)})
@@ -107,6 +112,11 @@ func (f *fakeStackRunner) Run(_ context.Context, name string, args []string, env
 			}
 			return nil, nil
 		case "exec":
+			f.healthProbeCount++
+			if f.blockHealthProbe && f.healthProbeCount > f.probesBeforeBlock {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
 			if version == f.failHealthVersion {
 				return nil, errors.New("simulated unhealthy orchestrator")
 			}
@@ -140,6 +150,13 @@ func (f *fakeStackRunner) inspect(identifiers []string) ([]byte, error) {
 		switch identifier {
 		case "orchestrator-container-full":
 			imageVersion := f.platformVersion
+			health := "healthy"
+			if f.healthAlwaysStarting || f.healthStartingCount > 0 {
+				health = "starting"
+				if f.healthStartingCount > 0 {
+					f.healthStartingCount--
+				}
+			}
 			if f.mismatchImageOnce {
 				f.mismatchImageOnce = false
 				imageVersion = "v0.0.0-mismatch"
@@ -152,7 +169,7 @@ func (f *fakeStackRunner) inspect(identifiers []string) ([]byte, error) {
 						"com.docker.compose.project.config_files": strings.Join(f.platformFiles, ","),
 					},
 				},
-				"State": map[string]any{"Status": "running", "Health": map[string]string{"Status": "healthy"}},
+				"State": map[string]any{"Status": "running", "Health": map[string]string{"Status": health}},
 			})
 		case "traefik-container-full":
 			values = append(values, map[string]any{"Id": identifier, "State": map[string]string{"Status": "running"}})
@@ -269,6 +286,110 @@ func testStackManager(t *testing.T, current string, runner *fakeStackRunner, ser
 	manager.healthTimeout = 20 * time.Millisecond
 	manager.healthInterval = time.Millisecond
 	return manager
+}
+
+func TestVerifyStackWaitsForDockerHealthAfterInContainerProbeSucceeds(t *testing.T) {
+	directory := t.TempDir()
+	files := writeExistingStack(t, directory, "v1.0.0", true)
+	runner := newFakeStackRunner("v1.0.0", files)
+	runner.healthStartingCount = 1
+	manager, err := newStackManager("previewctl/test", "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.runner = runner
+	currentTime := time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return currentTime }
+	manager.sleep = func(_ context.Context, duration time.Duration) error {
+		currentTime = currentTime.Add(duration)
+		return nil
+	}
+	manager.healthTimeout = 3 * time.Second
+	manager.healthInterval = time.Second
+	config, err := normalizeStackOptions(stackOptions{InstallDir: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := manager.snapshotManagedPreviews(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.verifyStack(context.Background(), config, files, "v1.0.0", expected); err != nil {
+		t.Fatal(err)
+	}
+	if got := countFakeComposeOperation(t, runner.records, "exec"); got != 2 {
+		t.Fatalf("healthcheck attempts = %d, want 2", got)
+	}
+}
+
+func TestVerifyStackTimesOutWhileDockerHealthRemainsStarting(t *testing.T) {
+	directory := t.TempDir()
+	files := writeExistingStack(t, directory, "v1.0.0", true)
+	runner := newFakeStackRunner("v1.0.0", files)
+	runner.healthAlwaysStarting = true
+	manager, err := newStackManager("previewctl/test", "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.runner = runner
+	currentTime := time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return currentTime }
+	manager.sleep = func(_ context.Context, duration time.Duration) error {
+		currentTime = currentTime.Add(duration)
+		return nil
+	}
+	manager.healthTimeout = 2 * time.Second
+	manager.healthInterval = time.Second
+	config, err := normalizeStackOptions(stackOptions{InstallDir: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := manager.snapshotManagedPreviews(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.verifyStack(context.Background(), config, files, "v1.0.0", expected)
+	if err == nil || !strings.Contains(err.Error(), "health=starting") || !strings.Contains(err.Error(), "did not become healthy") {
+		t.Fatalf("verifyStack() error = %v", err)
+	}
+	if got := countFakeComposeOperation(t, runner.records, "exec"); got != 3 {
+		t.Fatalf("healthcheck attempts = %d, want 3", got)
+	}
+}
+
+func TestVerifyStackHealthTimeoutCancelsBlockedProbe(t *testing.T) {
+	directory := t.TempDir()
+	files := writeExistingStack(t, directory, "v1.0.0", true)
+	runner := newFakeStackRunner("v1.0.0", files)
+	runner.blockHealthProbe = true
+	runner.probesBeforeBlock = 1
+	runner.healthStartingCount = 1
+	manager, err := newStackManager("previewctl/test", "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.runner = runner
+	manager.healthTimeout = 20 * time.Millisecond
+	manager.healthInterval = time.Millisecond
+	config, err := normalizeStackOptions(stackOptions{InstallDir: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := manager.snapshotManagedPreviews(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = manager.verifyStack(context.Background(), config, files, "v1.0.0", expected)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not become healthy") || !strings.Contains(err.Error(), "health=starting") {
+		t.Fatalf("verifyStack() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("blocked health probe was not cancelled promptly: %s", elapsed)
+	}
+	if got := countFakeComposeOperation(t, runner.records, "exec"); got != 2 {
+		t.Fatalf("healthcheck attempts = %d, want 2", got)
+	}
 }
 
 func writeExistingStack(t *testing.T, directory, version string, withOverlay bool) []string {
@@ -811,4 +932,22 @@ func assertComposeFileCount(t *testing.T, records []stackCommandRecord, want int
 	if !sawCompose {
 		t.Fatal("no Compose commands were recorded")
 	}
+}
+
+func countFakeComposeOperation(t *testing.T, records []stackCommandRecord, wantOperation string) int {
+	t.Helper()
+	count := 0
+	for _, record := range records {
+		if record.name != "docker" || len(record.args) == 0 || record.args[0] != "compose" {
+			continue
+		}
+		_, operation, _, err := parseFakeCompose(record.args[1:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if operation == wantOperation {
+			count++
+		}
+	}
+	return count
 }

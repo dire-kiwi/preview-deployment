@@ -98,8 +98,23 @@ func (a *app) run(ctx context.Context, args []string) error {
 	if command == "version" {
 		return a.runVersion(ctx, commandArgs)
 	}
+	if command == "self-update" {
+		return a.runSelfUpdate(ctx, commandArgs)
+	}
 	if command == "update" {
-		return a.runUpdate(ctx, commandArgs)
+		return a.runStackUpdate(ctx, commandArgs)
+	}
+	if command == "rollback" {
+		return a.runStackRollback(ctx, commandArgs)
+	}
+	if command == "status" {
+		return a.runStackStatus(ctx, commandArgs)
+	}
+	if command == "stack" {
+		return a.runStack(ctx, commandArgs)
+	}
+	if command == "start" && isStackStartInvocation(commandArgs) {
+		return a.runStackStart(ctx, commandArgs)
 	}
 
 	client, err := NewClient(global.apiURL, global.token, a.userAgent(), global.timeout)
@@ -360,9 +375,9 @@ func (a *app) runVersion(ctx context.Context, args []string) error {
 	return a.printUpdateCheck(status, *output)
 }
 
-func (a *app) runUpdate(ctx context.Context, args []string) error {
-	const usage = "Usage: previewctl update [--check] [--force] [--output text|json]\n"
-	flags := newCommandFlags("update")
+func (a *app) runSelfUpdate(ctx context.Context, args []string) error {
+	const usage = "Usage: previewctl self-update [--check] [--force] [--output text|json]\n"
+	flags := newCommandFlags("self-update")
 	checkOnly := flags.Bool("check", false, "only check whether an update is available")
 	force := flags.Bool("force", false, "reinstall even when already current")
 	output := flags.String("output", "text", "output format: text or json")
@@ -370,7 +385,7 @@ func (a *app) runUpdate(ctx context.Context, args []string) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return usageError("update does not accept positional arguments", usage)
+		return usageError("self-update does not accept positional arguments", usage)
 	}
 	if err := validateOutput(*output, "text", "json"); err != nil {
 		return usageError(err.Error(), usage)
@@ -403,12 +418,224 @@ func (a *app) runUpdate(ctx context.Context, args []string) error {
 	return nil
 }
 
+func (a *app) runStack(ctx context.Context, args []string) error {
+	const usage = "Usage: previewctl stack <start|update|status|rollback> [command flags]\n"
+	if len(args) == 0 {
+		return usageError("stack requires a subcommand", usage)
+	}
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
+		fmt.Fprint(a.streams.Out, usage)
+		return nil
+	}
+	switch args[0] {
+	case "start":
+		return a.runStackStart(ctx, args[1:])
+	case "update":
+		return a.runStackUpdate(ctx, args[1:])
+	case "status":
+		return a.runStackStatus(ctx, args[1:])
+	case "rollback":
+		return a.runStackRollback(ctx, args[1:])
+	default:
+		return usageError(fmt.Sprintf("unknown stack subcommand %q", args[0]), usage)
+	}
+}
+
+type stackFlagValues struct {
+	installDir   string
+	envFile      string
+	repository   string
+	version      string
+	composeFiles stringListFlag
+	output       string
+}
+
+func addStackFlags(flags *flag.FlagSet, defaultVersion string) *stackFlagValues {
+	values := &stackFlagValues{}
+	flags.StringVar(&values.installDir, "install-dir", os.Getenv("PREVIEW_DEPLOYMENT_INSTALL_DIR"), "stack installation directory")
+	flags.StringVar(&values.envFile, "env-file", os.Getenv("PREVIEW_DEPLOYMENT_ENV_FILE"), "stack Compose environment file")
+	flags.StringVar(&values.repository, "repository", os.Getenv("PREVIEW_DEPLOYMENT_REPOSITORY"), "release repository in OWNER/REPO form")
+	flags.StringVar(&values.version, "version", defaultVersion, "release tag or latest")
+	flags.Var(&values.composeFiles, "file", "Compose file in application order (repeatable)")
+	flags.StringVar(&values.output, "output", "text", "output format: text or json")
+	return values
+}
+
+func (v *stackFlagValues) options(force bool) stackOptions {
+	return stackOptions{
+		InstallDir:   v.installDir,
+		EnvFile:      v.envFile,
+		Repository:   v.repository,
+		Version:      v.version,
+		ComposeFiles: append([]string(nil), v.composeFiles...),
+		Force:        force,
+	}
+}
+
+func (a *app) runStackStart(ctx context.Context, args []string) error {
+	const usage = "Usage: previewctl start [--version TAG] [--install-dir DIR] [--env-file FILE] [--file FILE ...] [--repository OWNER/REPO] [--output text|json]\n"
+	flags := newCommandFlags("start")
+	values := addStackFlags(flags, "")
+	if err := parseCommandFlags(flags, args, usage); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return usageError("stack start does not accept positional arguments", usage)
+	}
+	if err := validateOutput(values.output, "text", "json"); err != nil {
+		return usageError(err.Error(), usage)
+	}
+	manager, err := newStackManager(a.userAgent(), a.build.Version)
+	if err != nil {
+		return err
+	}
+	result, err := manager.Start(ctx, values.options(false))
+	if err != nil {
+		return err
+	}
+	return a.printStackResult(result, values.output)
+}
+
+func (a *app) runStackUpdate(ctx context.Context, args []string) error {
+	const usage = "Usage: previewctl update [--check] [--version TAG] [--force] [--install-dir DIR] [--env-file FILE] [--file FILE ...] [--repository OWNER/REPO] [--output text|json]\n"
+	flags := newCommandFlags("update")
+	values := addStackFlags(flags, "latest")
+	checkOnly := flags.Bool("check", false, "resolve and report the target without changing the stack")
+	force := flags.Bool("force", false, "reinstall even when the stack is already current")
+	if err := parseCommandFlags(flags, args, usage); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return usageError("update does not accept positional arguments", usage)
+	}
+	if err := validateOutput(values.output, "text", "json"); err != nil {
+		return usageError(err.Error(), usage)
+	}
+	manager, err := newStackManager(a.userAgent(), a.build.Version)
+	if err != nil {
+		return err
+	}
+	result, err := manager.Update(ctx, values.options(*force), *checkOnly)
+	if err != nil {
+		return err
+	}
+	return a.printStackResult(result, values.output)
+}
+
+func (a *app) runStackStatus(ctx context.Context, args []string) error {
+	const usage = "Usage: previewctl status [--check] [--install-dir DIR] [--env-file FILE] [--file FILE ...] [--repository OWNER/REPO] [--output text|json]\n"
+	flags := newCommandFlags("status")
+	values := addStackFlags(flags, "")
+	checkLatest := flags.Bool("check", false, "also check GitHub for the latest release")
+	if err := parseCommandFlags(flags, args, usage); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return usageError("status does not accept positional arguments", usage)
+	}
+	if err := validateOutput(values.output, "text", "json"); err != nil {
+		return usageError(err.Error(), usage)
+	}
+	manager, err := newStackManager(a.userAgent(), a.build.Version)
+	if err != nil {
+		return err
+	}
+	result, err := manager.Status(ctx, values.options(false), *checkLatest)
+	if err != nil {
+		return err
+	}
+	return a.printStackStatus(result, values.output)
+}
+
+func (a *app) runStackRollback(ctx context.Context, args []string) error {
+	const usage = "Usage: previewctl rollback [--to TAG] [--force] [--install-dir DIR] [--env-file FILE] [--file FILE ...] [--repository OWNER/REPO] [--output text|json]\n"
+	flags := newCommandFlags("rollback")
+	values := addStackFlags(flags, "")
+	to := flags.String("to", "", "previous version to restore (default: newest backup)")
+	force := flags.Bool("force", false, "allow a compatibility-risking rollback")
+	if err := parseCommandFlags(flags, args, usage); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return usageError("rollback does not accept positional arguments", usage)
+	}
+	if err := validateOutput(values.output, "text", "json"); err != nil {
+		return usageError(err.Error(), usage)
+	}
+	manager, err := newStackManager(a.userAgent(), a.build.Version)
+	if err != nil {
+		return err
+	}
+	result, err := manager.Rollback(ctx, values.options(*force), *to)
+	if err != nil {
+		return err
+	}
+	return a.printStackResult(result, values.output)
+}
+
+func (a *app) printStackResult(result stackResult, output string) error {
+	if output == "json" {
+		return writeJSON(a.streams.Out, result)
+	}
+	fmt.Fprintln(a.streams.Out, result.String())
+	return nil
+}
+
+func (a *app) printStackStatus(status stackStatus, output string) error {
+	if output == "json" {
+		return writeJSON(a.streams.Out, status)
+	}
+	fmt.Fprintln(a.streams.Out, status.String())
+	return nil
+}
+
+func isStackStartInvocation(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		return true
+	}
+	for _, argument := range args {
+		for _, name := range []string{"--install-dir", "--env-file", "--file", "--repository", "--version"} {
+			if argument == name || strings.HasPrefix(argument, name+"=") {
+				return true
+			}
+		}
+	}
+	positional := 0
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--output" {
+			index++
+			continue
+		}
+		if strings.HasPrefix(argument, "--output=") || strings.HasPrefix(argument, "-") {
+			continue
+		}
+		positional++
+	}
+	return positional == 0
+}
+
+type stringListFlag []string
+
+func (f *stringListFlag) String() string { return strings.Join(*f, ",") }
+
+func (f *stringListFlag) Set(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("file path must not be empty")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
 func (a *app) printUpdateCheck(status updateCheck, output string) error {
 	if output == "json" {
 		return writeJSON(a.streams.Out, status)
 	}
 	if status.UpdateAvailable {
-		fmt.Fprintf(a.streams.Out, "Update available: %s -> %s\nRun `previewctl update` to install it.\n", status.Current, status.Latest)
+		fmt.Fprintf(a.streams.Out, "Update available: %s -> %s\nRun `previewctl self-update` to install it.\n", status.Current, status.Latest)
 	} else {
 		fmt.Fprintf(a.streams.Out, "previewctl %s is current\n", status.Current)
 	}
@@ -458,16 +685,20 @@ func (a *app) userAgent() string {
 
 func (a *app) printCommandHelp(command string) error {
 	usages := map[string]string{
-		"deploy":  "Usage: previewctl [global flags] deploy [--manifest FILE] [--output text|json] SOURCE\n",
-		"list":    "Usage: previewctl [global flags] list [--output table|json]\n",
-		"get":     "Usage: previewctl [global flags] get [--output text|json] ID\n",
-		"start":   "Usage: previewctl [global flags] start [--output text|json] ID\n",
-		"stop":    "Usage: previewctl [global flags] stop [--output text|json] ID\n",
-		"delete":  "Usage: previewctl [global flags] delete [--output text|json] ID\n",
-		"logs":    "Usage: previewctl [global flags] logs [--tail 1..5000] ID\n",
-		"health":  "Usage: previewctl [global flags] health [--output text|json]\n",
-		"version": "Usage: previewctl version [--check] [--output text|json]\n",
-		"update":  "Usage: previewctl update [--check] [--force] [--output text|json]\n",
+		"deploy":      "Usage: previewctl [global flags] deploy [--manifest FILE] [--output text|json] SOURCE\n",
+		"list":        "Usage: previewctl [global flags] list [--output table|json]\n",
+		"get":         "Usage: previewctl [global flags] get [--output text|json] ID\n",
+		"start":       "Usage: previewctl start [stack flags]\n       previewctl [global flags] start [--output text|json] ID\n",
+		"stop":        "Usage: previewctl [global flags] stop [--output text|json] ID\n",
+		"delete":      "Usage: previewctl [global flags] delete [--output text|json] ID\n",
+		"logs":        "Usage: previewctl [global flags] logs [--tail 1..5000] ID\n",
+		"health":      "Usage: previewctl [global flags] health [--output text|json]\n",
+		"version":     "Usage: previewctl version [--check] [--output text|json]\n",
+		"update":      "Usage: previewctl update [--check] [--version TAG] [stack flags]\n",
+		"rollback":    "Usage: previewctl rollback [--to TAG] [--force] [stack flags]\n",
+		"status":      "Usage: previewctl status [--check] [stack flags]\n",
+		"stack":       "Usage: previewctl stack <start|update|status|rollback> [command flags]\n",
+		"self-update": "Usage: previewctl self-update [--check] [--force] [--output text|json]\n",
 	}
 	usage, ok := usages[command]
 	if !ok {
@@ -564,12 +795,15 @@ Commands:
   list      List deployments
   get       Show one deployment
   logs      Read deployment logs
-  start     Start a stopped deployment
+  start     Start the installed stack, or start a stopped deployment by ID
   stop      Stop a deployment
   delete    Delete a deployment and any orchestrator-owned image
   health    Check orchestrator health
   version   Print build information and optionally check for updates
-  update    Check for or install the latest previewctl release
+  update    Update the router, orchestrator, and dashboard stack
+  rollback  Roll back the most recent stack update
+  status    Show the installed stack state
+  self-update  Check for or install the latest previewctl binary
 
 Global flags (must appear before COMMAND):
   --api-url URL       API base URL (default PREVIEWCTL_API_URL or http://127.0.0.1:8081)

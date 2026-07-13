@@ -18,6 +18,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Validate release tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "release tag must be a safe semantic version" >&2
+            exit 1
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -36,7 +45,10 @@ jobs:
         run: make test-hibernation
 
       - name: Check installer syntax
-        run: sh -n scripts/install-cli.sh scripts/install-stack.sh scripts/test-hibernation.sh
+        run: sh -n scripts/install-cli.sh scripts/install-stack.sh scripts/test-install-stack-bootstrap.sh scripts/test-hibernation.sh
+
+      - name: Test stack bootstrap delegation
+        run: scripts/test-install-stack-bootstrap.sh
 
   publish-image:
     needs: test
@@ -127,7 +139,8 @@ jobs:
 
           cp compose.yaml dist/release/compose.yaml
           cp .env.example dist/release/env.example
-          cp scripts/install-stack.sh dist/release/install-stack.sh
+          sed "s|^CLI_VERSION=.*$|CLI_VERSION=\${PREVIEWCTL_VERSION:-$TAG}|" \
+            scripts/install-stack.sh > dist/release/install-stack.sh
           cp scripts/install-cli.sh dist/release/install-cli.sh
           chmod 0755 dist/release/install-stack.sh dist/release/install-cli.sh
 

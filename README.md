@@ -7,26 +7,53 @@ A small, self-hosted preview platform built from two long-running containers:
 
 There is no database. Docker containers and labels are the source of truth, so previews remain visible across orchestrator upgrades and restarts.
 
-## Install or update the server
+## Install and manage the server
 
 Requirements: Docker Engine, the Docker Compose plugin, and `curl`.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/dire-kiwi/preview-deployment/releases/latest/download/install-stack.sh | sh
+  https://github.com/dire-kiwi/preview-deployment/releases/latest/download/install-cli.sh | sh
+
+previewctl start
 ```
 
-The command is idempotent: the first run installs the stack and later runs update it. It downloads a versioned Compose file, verifies its SHA-256 checksum, preserves the existing `.env`, pulls images, and reconciles the running services without taking the shared preview network down.
+`previewctl start` installs the current release on first use and otherwise starts
+the recorded version without upgrading it. It downloads checksum-verified
+release assets, preserves the existing `.env`, initializes the payload directory,
+and reconciles the router, orchestrator, and dashboard without taking the shared
+preview network down.
 
-The default install directory is `${XDG_DATA_HOME:-$HOME/.local/share}/preview-deployment`. Pin a release or choose another directory with installer arguments:
+The default stack directory is
+`${XDG_DATA_HOME:-$HOME/.local/share}/preview-deployment`. Pin the first install
+or choose another directory with CLI flags:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/dire-kiwi/preview-deployment/releases/latest/download/install-stack.sh |
-  sh -s -- --version v0.1.0 --install-dir /opt/preview-deployment
+previewctl start --version v0.3.0 --install-dir /opt/preview-deployment
 ```
 
-Equivalent environment variables are `PREVIEW_DEPLOYMENT_VERSION`, `PREVIEW_DEPLOYMENT_INSTALL_DIR`, `PREVIEW_DEPLOYMENT_ENV_FILE`, and `PREVIEW_DEPLOYMENT_REPOSITORY`.
+Use the same directory for every lifecycle command:
+
+```sh
+previewctl status --install-dir /opt/preview-deployment
+previewctl update --install-dir /opt/preview-deployment
+previewctl rollback --install-dir /opt/preview-deployment
+```
+
+`update` stages a verified release, locks the stack, retains a persistent backup,
+passes the complete ordered Compose overlay set to every Compose operation, and
+checks that every existing preview container has the same identity afterward.
+If reconciliation or verification fails, it restores the immediate backup
+automatically. `rollback` restores the most recent successful pre-update stack
+while preserving the current `.env` secrets and local overlays. Neither command
+runs `docker compose down` or prunes images.
+
+The legacy `install-stack.sh` release asset remains as a compatibility bootstrap;
+it installs `previewctl` and delegates to the same lifecycle commands rather than
+maintaining a separate rollout implementation.
+
+Equivalent environment variables include `PREVIEW_DEPLOYMENT_INSTALL_DIR`,
+`PREVIEW_DEPLOYMENT_ENV_FILE`, and `PREVIEW_DEPLOYMENT_REPOSITORY`.
 
 Local endpoints use loopback by default:
 
@@ -50,15 +77,18 @@ curl --proto '=https' --tlsv1.2 -fsSL \
   https://github.com/dire-kiwi/preview-deployment/releases/latest/download/install-cli.sh | sh
 ```
 
-It installs to `~/.local/bin` by default. Ensure that directory is on `PATH`, then inspect or update the installed version:
+It installs to `~/.local/bin` by default. Ensure that directory is on `PATH`,
+then inspect or update the CLI binary independently of the server stack:
 
 ```sh
 previewctl version
-previewctl update --check
-previewctl update
+previewctl self-update --check
+previewctl self-update
 ```
 
-`update --check` is read-only. `update` downloads the matching release artifact, verifies its checksum, and atomically replaces the current executable. The CLI never checks in the background.
+`self-update --check` is read-only. `self-update` downloads the matching release
+artifact, verifies its checksum, and atomically replaces the current executable.
+The CLI never checks in the background.
 
 The installer also accepts `--version`, `--install-dir`, and `--repository`; equivalent environment variables are `PREVIEWCTL_VERSION`, `PREVIEWCTL_INSTALL_DIR`, and `PREVIEW_DEPLOYMENT_REPOSITORY`.
 
@@ -164,7 +194,9 @@ Each Action run creates a new preview. Rerunning a job does not replace or delet
 
 ## API authentication
 
-Set `API_TOKEN` in the server's `.env`, then run the stack installer again. Every `/v1/*` request will require an exact bearer token; `/healthz` remains public.
+Set `API_TOKEN` in the server's `.env`, then run `previewctl start` to reconcile
+the recorded stack version. Every `/v1/*` request will require an exact bearer
+token; `/healthz` remains public.
 
 ```sh
 PREVIEWCTL_TOKEN='replace-with-a-secret' previewctl list
@@ -402,7 +434,8 @@ Copy `.env.example` when running from a source checkout. Common settings are:
 - `CODEX_AUTH_PATH`: optional absolute host path mounted read-only only for
   manifests that explicitly request `codex_auth`.
 - `PREVIEW_PAYLOAD_DIR`: absolute root-only host directory mounted at the same
-  path in the orchestrator; the installer defaults it to `INSTALL_DIR/payloads`.
+  path in the orchestrator; `previewctl start` defaults it to
+  `INSTALL_DIR/payloads` on a fresh installation.
 - `PREVIEW_RUNTIMES`: comma-separated logical runtime keys mapped to trusted
   local `preview-runtime/` image references.
 - `PREVIEW_DEPLOYMENT_VERSION`: orchestrator image tag used by Compose.

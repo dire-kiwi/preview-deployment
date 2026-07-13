@@ -140,7 +140,7 @@ esac
 fetch() {
     fetch_url=$1
     fetch_destination=$2
-    curl \
+    curl -q \
         --fail \
         --silent \
         --show-error \
@@ -157,7 +157,7 @@ fetch() {
 
 resolve_latest_tag() {
     latest_url=https://github.com/$REPOSITORY/releases/latest
-    effective_url=$(curl \
+    effective_url=$(curl -q \
         --fail \
         --silent \
         --show-error \

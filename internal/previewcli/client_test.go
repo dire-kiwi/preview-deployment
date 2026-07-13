@@ -219,11 +219,31 @@ func TestRunRejectsFlagsAfterDeploySource(t *testing.T) {
 }
 
 func TestRunHelpExitsSuccessfully(t *testing.T) {
-	for _, args := range [][]string{{"--help"}, {"deploy", "--help"}, {"help", "deploy"}} {
+	for _, args := range [][]string{{"--help"}, {"deploy", "--help"}, {"help", "deploy"}, {"start", "--help"}, {"stack", "--help"}, {"help", "rollback"}} {
 		var stdout, stderr bytes.Buffer
 		exitCode := Run(context.Background(), args, Streams{Out: &stdout, Err: &stderr}, BuildInfo{})
 		if exitCode != 0 || stdout.Len() == 0 || stderr.Len() != 0 {
 			t.Errorf("Run(%q) exit=%d stdout=%q stderr=%q", args, exitCode, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestStackStartInvocationPreservesDeploymentStart(t *testing.T) {
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{args: nil, want: true},
+		{args: []string{"--help"}, want: true},
+		{args: []string{"--install-dir", "/srv/preview"}, want: true},
+		{args: []string{"--version=v1.2.3"}, want: true},
+		{args: []string{"--output", "json"}, want: true},
+		{args: []string{"0123456789ab"}, want: false},
+		{args: []string{"--output", "json", "0123456789ab"}, want: false},
+	}
+	for _, test := range tests {
+		if got := isStackStartInvocation(test.args); got != test.want {
+			t.Errorf("isStackStartInvocation(%q) = %v, want %v", test.args, got, test.want)
 		}
 	}
 }

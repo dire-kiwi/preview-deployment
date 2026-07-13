@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -39,6 +40,150 @@ type previewActivity struct {
 type PreviewAccessResult struct {
 	Ready      bool
 	RetryAfter time.Duration
+}
+
+// Hibernate stops a preview that has request-driven wake labels. The operation
+// is idempotent for an already hibernated preview. If a request arrives while
+// Docker is stopping the container, that request wins and the same container
+// is resumed after the stop completes.
+func (s *Service) Hibernate(ctx context.Context, id string) (Deployment, error) {
+	if !validID(id) {
+		return Deployment{}, ErrNotFound
+	}
+	unlockLifecycle := s.lockPreviewLifecycle(id)
+	container, err := s.find(ctx, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			s.forgetPreview(id)
+		}
+		unlockLifecycle()
+		return Deployment{}, err
+	}
+	labels := container.Labels
+	wakeToken := labels[wakeTokenLabel]
+	if !hibernationSupported(labels) {
+		unlockLifecycle()
+		return Deployment{}, ErrHibernationUnavailable
+	}
+	deploymentID := id
+	port := parsePort(labels[portLabel])
+
+	restoreState := func(dockerState string) {
+		if dockerState == "running" {
+			s.markPreviewRunning(deploymentID, container.ID, wakeToken, port)
+		} else {
+			s.markPreviewStopped(deploymentID, container.ID, wakeToken, port)
+		}
+	}
+	s.markPreviewStopping(deploymentID, container.ID, wakeToken, port)
+	currentDetails, inspectErr := s.docker.InspectContainer(ctx, container.ID)
+	if inspectErr != nil {
+		restoreState(container.State)
+		unlockLifecycle()
+		if docker.IsNotFound(inspectErr) {
+			s.forgetPreview(deploymentID)
+			return Deployment{}, ErrNotFound
+		}
+		return Deployment{}, inspectErr
+	}
+	alreadyStopped := false
+	switch currentDetails.State.Status {
+	case "created", "exited":
+		alreadyStopped = true
+	case "running", "restarting":
+		// Docker can stop these states normally.
+	default:
+		restoreState(currentDetails.State.Status)
+		unlockLifecycle()
+		return Deployment{}, ErrHibernationUnavailable
+	}
+	if !alreadyStopped {
+		if stopErr := s.docker.StopContainer(ctx, container.ID, s.config.StopTimeout); stopErr != nil {
+			restoreState(currentDetails.State.Status)
+			unlockLifecycle()
+			if docker.IsNotFound(stopErr) {
+				s.forgetPreview(deploymentID)
+				return Deployment{}, ErrNotFound
+			}
+			return Deployment{}, stopErr
+		}
+	}
+	wakeAgain := s.finishIdleStop(deploymentID, container.ID)
+	unlockLifecycle()
+
+	if wakeAgain {
+		if _, wakeErr := s.startPreviewForRequest(ctx, deploymentID, wakeToken, container.ID); wakeErr != nil {
+			return Deployment{}, wakeErr
+		}
+	}
+	details := currentDetails
+	if !alreadyStopped || wakeAgain {
+		details, inspectErr = s.docker.InspectContainer(ctx, container.ID)
+		if docker.IsNotFound(inspectErr) {
+			s.forgetPreview(deploymentID)
+			return Deployment{}, ErrNotFound
+		}
+		if inspectErr != nil {
+			return Deployment{}, inspectErr
+		}
+	}
+	if wakeAgain {
+		s.logger.Info("manual preview hibernation superseded by an active request", "deployment_id", deploymentID)
+	} else if !alreadyStopped {
+		s.logger.Info("preview deployment manually hibernated", "deployment_id", deploymentID)
+	}
+	return s.fromDetails(details), nil
+}
+
+// deploymentHibernationState combines immutable wake-capability labels with a
+// lock-safe snapshot of transient in-process lifecycle state. Wake tokens are
+// validated for identity matching but are never copied into the public model.
+func (s *Service) deploymentHibernationState(containerID, dockerState string, labels map[string]string) (bool, string) {
+	if !hibernationSupported(labels) {
+		return false, HibernationStateUnavailable
+	}
+	id := labels[idLabel]
+	wakeToken := labels[wakeTokenLabel]
+
+	s.activityMu.Lock()
+	activity := s.activity[id]
+	matched := activity != nil && activity.containerID == containerID && wakeTokensEqual(activity.wakeToken, wakeToken)
+	state := previewStopped
+	if matched {
+		state = activity.state
+	}
+	s.activityMu.Unlock()
+
+	if matched {
+		switch state {
+		case previewWaking:
+			return true, HibernationStateResuming
+		case previewStopping:
+			return true, HibernationStateHibernating
+		case previewDeleting:
+			return true, HibernationStateUnavailable
+		case previewRunning, previewStopped:
+			// Docker is the durable source of truth for steady states. The
+			// in-memory map can briefly lag an external start or stop.
+		}
+	}
+
+	switch dockerState {
+	case "running":
+		return true, HibernationStateActive
+	case "restarting":
+		return true, HibernationStateResuming
+	case "created", "exited":
+		return true, HibernationStateHibernated
+	default:
+		return true, HibernationStateUnavailable
+	}
+}
+
+func hibernationSupported(labels map[string]string) bool {
+	return validID(labels[idLabel]) &&
+		labels[hibernationLabel] == hibernationValue &&
+		validWakeToken(labels[wakeTokenLabel])
 }
 
 // ObservePreviewRequest records activity for a managed preview. A stopped

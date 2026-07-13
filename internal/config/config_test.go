@@ -41,6 +41,76 @@ func TestLoadReadsAPIToken(t *testing.T) {
 	}
 }
 
+func TestLoadReadsDashboardControls(t *testing.T) {
+	t.Setenv("DASHBOARD_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("DASHBOARD_ORIGIN", "HTTPS://API.Preview.Example.Test:0443")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DashboardToken != "0123456789abcdef0123456789abcdef" {
+		t.Fatal("DashboardToken was not preserved")
+	}
+	if cfg.DashboardOrigin != "https://api.preview.example.test" {
+		t.Fatalf("DashboardOrigin = %q", cfg.DashboardOrigin)
+	}
+}
+
+func TestLoadRejectsUnsafeDashboardControls(t *testing.T) {
+	tests := []struct {
+		name   string
+		api    string
+		token  string
+		origin string
+	}{
+		{name: "origin without token", origin: "https://api.preview.example.test"},
+		{name: "short token", token: "too-short", origin: "https://api.preview.example.test"},
+		{name: "token without origin", token: "0123456789abcdef0123456789abcdef"},
+		{name: "origin path", token: "0123456789abcdef0123456789abcdef", origin: "https://api.preview.example.test/dashboard"},
+		{name: "origin credentials", token: "0123456789abcdef0123456789abcdef", origin: "https://user@api.preview.example.test"},
+		{name: "origin scheme", token: "0123456789abcdef0123456789abcdef", origin: "ftp://api.preview.example.test"},
+		{name: "cleartext remote origin", token: "0123456789abcdef0123456789abcdef", origin: "http://api.preview.example.test"},
+		{name: "reused API token", api: "0123456789abcdef0123456789abcdef", token: "0123456789abcdef0123456789abcdef", origin: "https://api.preview.example.test"},
+		{name: "zero origin port", token: "0123456789abcdef0123456789abcdef", origin: "https://api.preview.example.test:0"},
+		{name: "out of range origin port", token: "0123456789abcdef0123456789abcdef", origin: "https://api.preview.example.test:65536"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("API_TOKEN", test.api)
+			t.Setenv("DASHBOARD_TOKEN", test.token)
+			t.Setenv("DASHBOARD_ORIGIN", test.origin)
+			if _, err := Load(); err == nil {
+				t.Fatal("Load() accepted unsafe dashboard controls")
+			}
+		})
+	}
+}
+
+func TestLoadAllowsCleartextDashboardControlsOnlyForLocalDevelopment(t *testing.T) {
+	for _, test := range []struct {
+		origin string
+		want   string
+	}{
+		{origin: "http://api.localhost:0080", want: "http://api.localhost"},
+		{origin: "http://127.0.0.1:8080", want: "http://127.0.0.1:8080"},
+		{origin: "http://[::1]:8080", want: "http://[::1]:8080"},
+	} {
+		t.Run(test.origin, func(t *testing.T) {
+			t.Setenv("DASHBOARD_TOKEN", "0123456789abcdef0123456789abcdef")
+			t.Setenv("DASHBOARD_ORIGIN", test.origin)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.DashboardOrigin != test.want {
+				t.Fatalf("DashboardOrigin = %q, want %q", cfg.DashboardOrigin, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadReadsPreviewHibernationDurations(t *testing.T) {
 	t.Setenv("PREVIEW_IDLE_TIMEOUT", "45m")
 	t.Setenv("PREVIEW_IDLE_CHECK_INTERVAL", "12s")

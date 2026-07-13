@@ -3,12 +3,15 @@ package config
 import (
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const mebibyte = int64(1024 * 1024)
@@ -17,6 +20,8 @@ const mebibyte = int64(1024 * 1024)
 type Config struct {
 	ListenAddr        string
 	APIToken          string
+	DashboardToken    string
+	DashboardOrigin   string
 	DockerSocket      string
 	DockerNetwork     string
 	PreviewDomain     string
@@ -49,6 +54,8 @@ func Load() (Config, error) {
 	cfg := Config{
 		ListenAddr:               envOr("LISTEN_ADDR", ":8080"),
 		APIToken:                 envOr("API_TOKEN", ""),
+		DashboardToken:           envOr("DASHBOARD_TOKEN", ""),
+		DashboardOrigin:          strings.TrimSpace(envOr("DASHBOARD_ORIGIN", "")),
 		DockerSocket:             envOr("DOCKER_SOCKET", "/var/run/docker.sock"),
 		DockerNetwork:            envOr("DOCKER_NETWORK", "preview-network"),
 		PreviewDomain:            strings.ToLower(envOr("PREVIEW_DOMAIN", "localhost")),
@@ -131,6 +138,9 @@ func Load() (Config, error) {
 	if strings.TrimSpace(cfg.DockerSocket) == "" {
 		return Config{}, fmt.Errorf("DOCKER_SOCKET must not be empty")
 	}
+	if err := validateDashboardControls(&cfg); err != nil {
+		return Config{}, err
+	}
 	if !safeConfigToken(cfg.DockerNetwork) {
 		return Config{}, fmt.Errorf("DOCKER_NETWORK contains invalid characters")
 	}
@@ -151,6 +161,62 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func validateDashboardControls(cfg *Config) error {
+	if cfg.DashboardToken == "" {
+		if cfg.DashboardOrigin != "" {
+			return fmt.Errorf("DASHBOARD_ORIGIN requires DASHBOARD_TOKEN")
+		}
+		return nil
+	}
+	if len(cfg.DashboardToken) < 32 || len(cfg.DashboardToken) > 256 || strings.IndexFunc(cfg.DashboardToken, unicode.IsControl) >= 0 {
+		return fmt.Errorf("DASHBOARD_TOKEN must contain between 32 and 256 bytes without control characters")
+	}
+	if cfg.APIToken != "" && cfg.DashboardToken == cfg.APIToken {
+		return fmt.Errorf("DASHBOARD_TOKEN must be different from API_TOKEN")
+	}
+	if cfg.DashboardOrigin == "" {
+		return fmt.Errorf("DASHBOARD_ORIGIN is required when DASHBOARD_TOKEN is configured")
+	}
+	origin, err := url.Parse(cfg.DashboardOrigin)
+	if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") || origin.Host == "" ||
+		origin.User != nil || origin.Path != "" || origin.RawPath != "" || origin.RawQuery != "" || origin.Fragment != "" || origin.Opaque != "" {
+		return fmt.Errorf("DASHBOARD_ORIGIN must be an exact http or https origin without credentials, path, query, or fragment")
+	}
+	if strings.ContainsAny(origin.Host, "\r\n\t ") {
+		return fmt.Errorf("DASHBOARD_ORIGIN contains invalid hostname characters")
+	}
+	if origin.Scheme != "https" && !localDashboardHostname(origin.Hostname()) {
+		return fmt.Errorf("DASHBOARD_ORIGIN must use https except for localhost or loopback development")
+	}
+	port := origin.Port()
+	if port != "" {
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return fmt.Errorf("DASHBOARD_ORIGIN port must be between 1 and 65535")
+		}
+		port = strconv.Itoa(number)
+	}
+	hostname := strings.ToLower(origin.Hostname())
+	canonicalHost := hostname
+	if strings.Contains(hostname, ":") {
+		canonicalHost = "[" + hostname + "]"
+	}
+	if port != "" && !((origin.Scheme == "http" && port == "80") || (origin.Scheme == "https" && port == "443")) {
+		canonicalHost = net.JoinHostPort(hostname, port)
+	}
+	cfg.DashboardOrigin = strings.ToLower(origin.Scheme) + "://" + canonicalHost
+	return nil
+}
+
+func localDashboardHostname(hostname string) bool {
+	hostname = strings.ToLower(hostname)
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return true
+	}
+	address := net.ParseIP(hostname)
+	return address != nil && address.IsLoopback()
 }
 
 var (

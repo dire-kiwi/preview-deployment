@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,9 +40,34 @@ type API struct {
 	maxBinaryBytes int64
 	authEnabled    bool
 	authHeaderHash [sha256.Size]byte
+
+	dashboardControlsEnabled bool
+	dashboardOrigin          string
+	dashboardAuthHeaderHash  [sha256.Size]byte
+	dashboardCSRFKey         [sha256.Size]byte
+	hibernateDeployment      func(context.Context, string) (orchestrator.Deployment, error)
 }
 
-func New(service *orchestrator.Service, dockerClient *docker.Client, logger *slog.Logger, maxUploadBytes, maxBinaryBytes int64, apiToken string) *API {
+// Option customizes optional API surfaces.
+type Option func(*API)
+
+// WithDashboardControls enables the authenticated dashboard and its manual
+// hibernation action. Configuration validation is performed before this option
+// is passed to the API.
+func WithDashboardControls(token, origin string) Option {
+	return func(a *API) {
+		if token == "" {
+			return
+		}
+		a.dashboardControlsEnabled = true
+		a.dashboardOrigin = origin
+		credentials := base64.StdEncoding.EncodeToString([]byte("preview:" + token))
+		a.dashboardAuthHeaderHash = sha256.Sum256([]byte("Basic " + credentials))
+		a.dashboardCSRFKey = sha256.Sum256([]byte("preview-deployment dashboard csrf\x00" + token))
+	}
+}
+
+func New(service *orchestrator.Service, dockerClient *docker.Client, logger *slog.Logger, maxUploadBytes, maxBinaryBytes int64, apiToken string, options ...Option) *API {
 	a := &API{
 		service:        service,
 		docker:         dockerClient,
@@ -49,9 +75,15 @@ func New(service *orchestrator.Service, dockerClient *docker.Client, logger *slo
 		maxUploadBytes: maxUploadBytes,
 		maxBinaryBytes: maxBinaryBytes,
 	}
+	if service != nil {
+		a.hibernateDeployment = service.Hibernate
+	}
 	if apiToken != "" {
 		a.authEnabled = true
 		a.authHeaderHash = sha256.Sum256([]byte("Bearer " + apiToken))
+	}
+	for _, option := range options {
+		option(a)
 	}
 	return a
 }
@@ -59,6 +91,7 @@ func New(service *orchestrator.Service, dockerClient *docker.Client, logger *slo
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", a.dashboard)
+	mux.HandleFunc("POST /dashboard/hibernate", a.hibernateFromDashboard)
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /internal/previews/{id}/activity", a.previewActivity)
 	mux.HandleFunc("GET /v1/deployments", a.listDeployments)
@@ -131,26 +164,34 @@ func writeResumePage(w http.ResponseWriter, retryAfter time.Duration) {
 }
 
 func (a *API) authenticate(next http.Handler) http.Handler {
-	if !a.authEnabled {
-		return next
-	}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1" && !strings.HasPrefix(r.URL.Path, "/v1/") {
-			next.ServeHTTP(w, r)
-			return
+		if a.dashboardControlsEnabled && (r.URL.Path == "/" || r.URL.Path == "/dashboard/hibernate") {
+			authorization := r.Header.Values("Authorization")
+			authorized := 0
+			if len(authorization) == 1 {
+				providedHash := sha256.Sum256([]byte(authorization[0]))
+				authorized = subtle.ConstantTimeCompare(providedHash[:], a.dashboardAuthHeaderHash[:])
+			}
+			if authorized != 1 {
+				setDashboardHeaders(w.Header())
+				w.Header().Set("WWW-Authenticate", `Basic realm="preview-deployment dashboard", charset="UTF-8"`)
+				http.Error(w, "Dashboard authentication required", http.StatusUnauthorized)
+				return
+			}
 		}
 
-		authorization := r.Header.Values("Authorization")
-		authorized := 0
-		if len(authorization) == 1 {
-			providedHash := sha256.Sum256([]byte(authorization[0]))
-			authorized = subtle.ConstantTimeCompare(providedHash[:], a.authHeaderHash[:])
-		}
-		if authorized != 1 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="preview-deployment"`)
-			writeAPIError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
-			return
+		if a.authEnabled && (r.URL.Path == "/v1" || strings.HasPrefix(r.URL.Path, "/v1/")) {
+			authorization := r.Header.Values("Authorization")
+			authorized := 0
+			if len(authorization) == 1 {
+				providedHash := sha256.Sum256([]byte(authorization[0]))
+				authorized = subtle.ConstantTimeCompare(providedHash[:], a.authHeaderHash[:])
+			}
+			if authorized != 1 {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="preview-deployment"`)
+				writeAPIError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r)

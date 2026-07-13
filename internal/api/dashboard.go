@@ -102,6 +102,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     form { margin:0; }
     button { min-height:44px; padding:10px 13px; border:1px solid #8a6530; border-radius:11px; background:#352713; color:#ffd99a; cursor:pointer; font:inherit; font-weight:800; }
     button:hover { border-color:var(--amber); background:#473419; }
+    button:disabled { border-color:var(--line); background:#111827; color:var(--muted); cursor:not-allowed; }
+    .action-hint { grid-column:1/-1; margin:0; color:var(--muted); font-size:12px; line-height:1.45; }
     button:focus-visible, a:focus-visible { outline:3px solid #5ea8ff66; outline-offset:2px; }
     .empty { padding:56px 24px; border:1px dashed var(--line); border-radius:18px; color:var(--muted); text-align:center; }
     footer { margin-top:28px; color:#6f829d; font-size:12px; }
@@ -130,8 +132,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         {{if .StatusDetail}}<dt>Details</dt><dd>{{.StatusDetail}}</dd>{{end}}
       </dl>
       <div class="actions">
-        <a href="{{.URL}}" target="_blank" rel="noopener noreferrer"><span>Open preview</span><span aria-hidden="true">↗</span></a>
-        {{if .CanHibernate}}<form method="post" action="/dashboard/hibernate"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="csrf" value="{{.CSRFToken}}"><button type="submit">Hibernate now</button></form>{{end}}
+        <a href="{{.URL}}" target="_blank" rel="noopener noreferrer"><span>{{.PreviewActionLabel}}</span><span aria-hidden="true">↗</span></a>
+        {{if $.ControlsEnabled}}{{if .CanHibernate}}<form method="post" action="/dashboard/hibernate"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="csrf" value="{{.CSRFToken}}"><button type="submit">Hibernate now</button></form>{{else}}<button type="button" disabled>{{.ControlLabel}}</button>{{end}}{{end}}
+        {{if and $.ControlsEnabled .ControlHint}}<p class="action-hint">{{.ControlHint}}</p>{{end}}
       </div>
     </article>
     {{end}}
@@ -144,8 +147,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 
 type dashboardDeployment struct {
 	orchestrator.Deployment
-	CSRFToken    string
-	CanHibernate bool
+	CSRFToken          string
+	CanHibernate       bool
+	PreviewActionLabel string
+	ControlLabel       string
+	ControlHint        string
 }
 
 type dashboardData struct {
@@ -164,12 +170,7 @@ func (a *API) dashboard(writer http.ResponseWriter, request *http.Request) {
 	}
 	cards := make([]dashboardDeployment, 0, len(deployments))
 	for _, deployment := range deployments {
-		card := dashboardDeployment{Deployment: deployment}
-		if a.dashboardControlsEnabled && deployment.HibernationEnabled && deployment.HibernationState == orchestrator.HibernationStateActive {
-			card.CanHibernate = true
-			card.CSRFToken = a.dashboardCSRFToken(deployment.ID)
-		}
-		cards = append(cards, card)
+		cards = append(cards, a.dashboardCard(deployment))
 	}
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := dashboardTemplate.Execute(writer, dashboardData{
@@ -179,6 +180,41 @@ func (a *API) dashboard(writer http.ResponseWriter, request *http.Request) {
 	}); err != nil {
 		a.logger.Error("could not write deployment dashboard", "error", err)
 	}
+}
+
+func (a *API) dashboardCard(deployment orchestrator.Deployment) dashboardDeployment {
+	card := dashboardDeployment{
+		Deployment:         deployment,
+		PreviewActionLabel: "Open preview",
+	}
+	if !a.dashboardControlsEnabled {
+		return card
+	}
+	if !deployment.HibernationEnabled {
+		card.ControlLabel = "Hibernation unavailable"
+		card.ControlHint = "Redeploy this preview to enable safe request-driven wake-up."
+		return card
+	}
+
+	switch deployment.HibernationState {
+	case orchestrator.HibernationStateActive:
+		card.CanHibernate = true
+		card.CSRFToken = a.dashboardCSRFToken(deployment.ID)
+	case orchestrator.HibernationStateHibernated:
+		card.PreviewActionLabel = "Resume preview"
+		card.ControlLabel = "Already hibernated"
+		card.ControlHint = "Opening the preview safely wakes the same container."
+	case orchestrator.HibernationStateHibernating:
+		card.ControlLabel = "Hibernating…"
+		card.ControlHint = "A request that arrives during shutdown will resume this preview."
+	case orchestrator.HibernationStateResuming:
+		card.ControlLabel = "Resuming…"
+		card.ControlHint = "The preview will become available after its application starts."
+	default:
+		card.ControlLabel = "Hibernation unavailable"
+		card.ControlHint = "Inspect this preview's Docker state before trying again."
+	}
+	return card
 }
 
 func (a *API) hibernateFromDashboard(writer http.ResponseWriter, request *http.Request) {
@@ -274,7 +310,9 @@ func (a *API) writeDashboardServiceError(writer http.ResponseWriter, err error) 
 func setDashboardHeaders(header http.Header) {
 	header.Set("Cache-Control", "no-store")
 	header.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
-	header.Set("Referrer-Policy", "no-referrer")
+	// A same-origin policy keeps cross-origin navigation private while allowing
+	// basic HTML form POSTs to carry their real Origin instead of "null".
+	header.Set("Referrer-Policy", "same-origin")
 	header.Set("X-Robots-Tag", "noindex, nofollow")
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("X-Frame-Options", "DENY")

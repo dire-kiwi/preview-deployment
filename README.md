@@ -116,10 +116,12 @@ npm run build
 previewctl deploy --manifest preview.json --output json .
 ```
 
-Open the read-only deployment dashboard at the orchestrator's root URL, such as
-`https://api.preview.example.com/`.
-The bundled Traefik rule exposes only that exact `/` path. Health and `/v1/*`
-remain on the loopback orchestrator port for SSH-forwarded automation.
+Open the deployment dashboard at the orchestrator's root URL, such as
+`https://api.preview.example.com/`. It reports each preview's container and
+hibernation state. Manual controls are hidden unless the separately
+authenticated dashboard controls described below are configured. The bundled
+Traefik rule exposes only the exact dashboard paths. Health and `/v1/*` remain
+on the loopback orchestrator port for SSH-forwarded automation.
 
 ## Deploy from GitHub Actions
 
@@ -266,7 +268,8 @@ curl --fail-with-body -H 'Content-Type: application/zip' \
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/` | Read-only deployment dashboard |
+| `GET` | `/` | Deployment and hibernation-state dashboard |
+| `POST` | `/dashboard/hibernate` | Authenticated, CSRF-protected dashboard hibernation action |
 | `POST` | `/v1/deployments` | Upload, build, create, and start |
 | `GET` | `/v1/deployments` | List managed deployments |
 | `GET` | `/v1/deployments/{id}` | Inspect one deployment |
@@ -300,6 +303,35 @@ random per-preview control token, and the supplied stack does not expose
 Traefik's diagnostic API where dynamic labels could reveal those tokens. A
 manual `previewctl stop` is also temporary: the next routed request resumes
 that preview.
+
+The dashboard reports `Active`, `Hibernating`, `Hibernated`, `Resuming`, or
+`Unavailable` independently of Docker's raw container status. `Unavailable`
+means the container predates hibernation support, was deployed while
+hibernation was disabled, or is currently in an unrecoverable/transitional
+Docker state such as paused, dead, or removing. The dashboard will not stop a
+preview unless it has a safe request-driven wake route and a stoppable state.
+Redeploy legacy previews to opt in; inspect Docker when an opted-in preview is
+unexpectedly unavailable.
+
+To enable the **Hibernate now** button, configure a dedicated dashboard token
+and the exact browser origin:
+
+```dotenv
+DASHBOARD_TOKEN=replace-with-at-least-32-random-characters
+DASHBOARD_ORIGIN=https://api.preview.example.com
+```
+
+`DASHBOARD_ORIGIN` must use HTTPS. Cleartext HTTP is accepted only for
+`localhost`, `*.localhost`, or a loopback IP during local development.
+
+The dashboard then requires HTTP Basic Auth with username `preview` and
+`DASHBOARD_TOKEN` as the password. The token is separate from `API_TOKEN`, is
+rejected at startup if it matches `API_TOKEN`, is never embedded in the page,
+and should be stored with the same care as any control-plane credential. Each
+button uses a per-preview HMAC CSRF token, and
+the server rejects requests whose `Origin` does not exactly match
+`DASHBOARD_ORIGIN`. The released Traefik configuration exposes only the exact
+dashboard root and hibernation POST; `/v1` remains private.
 
 The stopped-container hook requires Traefik 3.6 or newer; the supplied Compose
 file pins a compatible release. Because ForwardAuth observes every request,
@@ -359,6 +391,8 @@ idle cycle, then removes the disposable daemon and all of its resources.
 Copy `.env.example` when running from a source checkout. Common settings are:
 
 - `API_TOKEN`: optional bearer token for `/v1/*`.
+- `DASHBOARD_TOKEN` and `DASHBOARD_ORIGIN`: optional, separate dashboard Basic
+  Auth credential and exact allowed origin for manual hibernation controls.
 - `PREVIEW_DOMAIN`: suffix used for preview hostnames.
 - `TRAEFIK_HTTP_PORT` and `PUBLIC_PORT`: listening and advertised ports; keep them equal.
 - `MAX_DEPLOYMENTS`, `MAX_UPLOAD_MB`, and `BUILD_CONCURRENCY`: platform capacity controls.

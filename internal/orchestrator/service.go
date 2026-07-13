@@ -37,26 +37,37 @@ const (
 )
 
 var (
-	ErrNotFound = errors.New("deployment not found")
-	ErrCapacity = errors.New("deployment capacity reached")
+	ErrNotFound               = errors.New("deployment not found")
+	ErrCapacity               = errors.New("deployment capacity reached")
+	ErrHibernationUnavailable = errors.New("deployment does not support hibernation")
+)
+
+const (
+	HibernationStateActive      = "active"
+	HibernationStateHibernating = "hibernating"
+	HibernationStateHibernated  = "hibernated"
+	HibernationStateResuming    = "resuming"
+	HibernationStateUnavailable = "unavailable"
 )
 
 // Deployment is the public representation of a managed preview container.
 type Deployment struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name,omitempty"`
-	URL            string     `json:"url"`
-	Status         string     `json:"status"`
-	StatusDetail   string     `json:"status_detail,omitempty"`
-	ContainerID    string     `json:"container_id"`
-	Image          string     `json:"image"`
-	Port           int        `json:"port"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	ExitCode       *int       `json:"exit_code,omitempty"`
-	OOMKilled      bool       `json:"oom_killed,omitempty"`
-	ContainerError string     `json:"container_error,omitempty"`
+	ID                 string     `json:"id"`
+	Name               string     `json:"name,omitempty"`
+	URL                string     `json:"url"`
+	Status             string     `json:"status"`
+	StatusDetail       string     `json:"status_detail,omitempty"`
+	ContainerID        string     `json:"container_id"`
+	Image              string     `json:"image"`
+	Port               int        `json:"port"`
+	CreatedAt          time.Time  `json:"created_at"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	FinishedAt         *time.Time `json:"finished_at,omitempty"`
+	ExitCode           *int       `json:"exit_code,omitempty"`
+	OOMKilled          bool       `json:"oom_killed,omitempty"`
+	ContainerError     string     `json:"container_error,omitempty"`
+	HibernationEnabled bool       `json:"hibernation_enabled"`
+	HibernationState   string     `json:"hibernation_state"`
 }
 
 // Service coordinates builds and lifecycle operations with Docker.
@@ -277,15 +288,18 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 		// The container was successfully started. Return a useful representation
 		// even if the immediate inspection races with a daemon event.
 		s.logger.Warn("could not inspect newly started deployment", "deployment_id", id, "error", err)
+		hibernationEnabled, hibernationState := s.deploymentHibernationState(containerID, "running", labels)
 		return Deployment{
-			ID:          id,
-			Name:        deploymentBundle.Manifest.Name,
-			URL:         s.previewURL(id),
-			Status:      "starting",
-			ContainerID: containerID,
-			Image:       image,
-			Port:        deploymentBundle.Manifest.Port,
-			CreatedAt:   createdAt,
+			ID:                 id,
+			Name:               deploymentBundle.Manifest.Name,
+			URL:                s.previewURL(id),
+			Status:             "starting",
+			ContainerID:        containerID,
+			Image:              image,
+			Port:               deploymentBundle.Manifest.Port,
+			CreatedAt:          createdAt,
+			HibernationEnabled: hibernationEnabled,
+			HibernationState:   hibernationState,
 		}, nil
 	}
 
@@ -340,17 +354,31 @@ func (s *Service) Get(ctx context.Context, id string) (Deployment, error) {
 }
 
 func (s *Service) Start(ctx context.Context, id string) (Deployment, error) {
+	if !validID(id) {
+		return Deployment{}, ErrNotFound
+	}
+	unlockLifecycle := s.lockPreviewLifecycle(id)
+	defer unlockLifecycle()
 	container, err := s.find(ctx, id)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			s.forgetPreview(id)
+		}
 		return Deployment{}, err
 	}
-	unlockLifecycle := s.lockPreviewLifecycle(container.Labels[idLabel])
-	defer unlockLifecycle()
 	if err := s.docker.StartContainer(ctx, container.ID); err != nil {
+		if docker.IsNotFound(err) {
+			s.forgetPreview(id)
+			return Deployment{}, ErrNotFound
+		}
 		return Deployment{}, err
 	}
 	s.markPreviewRunning(container.Labels[idLabel], container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 	details, err := s.docker.InspectContainer(ctx, container.ID)
+	if docker.IsNotFound(err) {
+		s.forgetPreview(id)
+		return Deployment{}, ErrNotFound
+	}
 	if err != nil {
 		return Deployment{}, err
 	}
@@ -359,40 +387,73 @@ func (s *Service) Start(ctx context.Context, id string) (Deployment, error) {
 }
 
 func (s *Service) Stop(ctx context.Context, id string) (Deployment, error) {
+	if !validID(id) {
+		return Deployment{}, ErrNotFound
+	}
+	unlockLifecycle := s.lockPreviewLifecycle(id)
 	container, err := s.find(ctx, id)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			s.forgetPreview(id)
+		}
+		unlockLifecycle()
 		return Deployment{}, err
 	}
-	unlockLifecycle := s.lockPreviewLifecycle(container.Labels[idLabel])
-	defer unlockLifecycle()
-	s.markPreviewStopping(container.Labels[idLabel], container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
+	deploymentID := container.Labels[idLabel]
+	wakeToken := container.Labels[wakeTokenLabel]
+	port := parsePort(container.Labels[portLabel])
+	s.markPreviewStopping(deploymentID, container.ID, wakeToken, port)
 	if err := s.docker.StopContainer(ctx, container.ID, s.config.StopTimeout); err != nil {
-		s.markPreviewRunning(container.Labels[idLabel], container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
+		if docker.IsNotFound(err) {
+			s.forgetPreview(deploymentID)
+			unlockLifecycle()
+			return Deployment{}, ErrNotFound
+		}
+		s.markPreviewRunning(deploymentID, container.ID, wakeToken, port)
+		unlockLifecycle()
 		return Deployment{}, err
 	}
-	s.markPreviewStopped(container.Labels[idLabel], container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
+	wakeAgain := s.finishIdleStop(deploymentID, container.ID)
+	unlockLifecycle()
+	if wakeAgain {
+		if _, err := s.startPreviewForRequest(ctx, deploymentID, wakeToken, container.ID); err != nil {
+			return Deployment{}, err
+		}
+	}
 	details, err := s.docker.InspectContainer(ctx, container.ID)
+	if docker.IsNotFound(err) {
+		s.forgetPreview(deploymentID)
+		return Deployment{}, ErrNotFound
+	}
 	if err != nil {
 		return Deployment{}, err
 	}
-	s.logger.Info("preview deployment stopped", "deployment_id", id)
+	if wakeAgain {
+		s.logger.Info("preview deployment stop superseded by an active request", "deployment_id", id)
+	} else {
+		s.logger.Info("preview deployment stopped", "deployment_id", id)
+	}
 	return s.fromDetails(details), nil
 }
 
 // Delete stops and removes the container, then removes its orchestrator-owned
 // generated image. Shared local runtime images are never removed.
 func (s *Service) Delete(ctx context.Context, id string) error {
+	if !validID(id) {
+		return ErrNotFound
+	}
+	unlockLifecycle := s.lockPreviewLifecycle(id)
+	defer unlockLifecycle()
 	container, err := s.find(ctx, id)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) && validID(id) {
+		if errors.Is(err, ErrNotFound) {
+			s.forgetPreview(id)
 			if removeErr := removePayload(s.config.PayloadDir, id); removeErr != nil {
 				return removeErr
 			}
 		}
 		return err
 	}
-	unlockLifecycle := s.lockPreviewLifecycle(id)
-	defer unlockLifecycle()
 	s.markPreviewDeleting(id, container.ID, container.Labels[wakeTokenLabel], parsePort(container.Labels[portLabel]))
 	image := container.Labels[imageLabel]
 	if image == "" {
@@ -575,6 +636,7 @@ func validateImagePolicy(details docker.ImageDetails) error {
 func (s *Service) fromSummary(container docker.ContainerSummary) Deployment {
 	labels := container.Labels
 	id := labels[idLabel]
+	hibernationEnabled, hibernationState := s.deploymentHibernationState(container.ID, container.State, labels)
 	createdAt := parseTime(labels[createdLabel])
 	if createdAt.IsZero() {
 		createdAt = time.Unix(container.Created, 0).UTC()
@@ -584,21 +646,24 @@ func (s *Service) fromSummary(container docker.ContainerSummary) Deployment {
 		image = container.Image
 	}
 	return Deployment{
-		ID:           id,
-		Name:         labels[nameLabel],
-		URL:          s.previewURL(id),
-		Status:       container.State,
-		StatusDetail: container.Status,
-		ContainerID:  container.ID,
-		Image:        image,
-		Port:         parsePort(labels[portLabel]),
-		CreatedAt:    createdAt,
+		ID:                 id,
+		Name:               labels[nameLabel],
+		URL:                s.previewURL(id),
+		Status:             container.State,
+		StatusDetail:       container.Status,
+		ContainerID:        container.ID,
+		Image:              image,
+		Port:               parsePort(labels[portLabel]),
+		CreatedAt:          createdAt,
+		HibernationEnabled: hibernationEnabled,
+		HibernationState:   hibernationState,
 	}
 }
 
 func (s *Service) fromDetails(details docker.ContainerDetails) Deployment {
 	labels := details.Config.Labels
 	id := labels[idLabel]
+	hibernationEnabled, hibernationState := s.deploymentHibernationState(details.ID, details.State.Status, labels)
 	createdAt := parseTime(labels[createdLabel])
 	if createdAt.IsZero() {
 		createdAt = parseTime(details.Created)
@@ -608,16 +673,18 @@ func (s *Service) fromDetails(details docker.ContainerDetails) Deployment {
 		image = details.Config.Image
 	}
 	deployment := Deployment{
-		ID:             id,
-		Name:           labels[nameLabel],
-		URL:            s.previewURL(id),
-		Status:         details.State.Status,
-		ContainerID:    details.ID,
-		Image:          image,
-		Port:           parsePort(labels[portLabel]),
-		CreatedAt:      createdAt,
-		OOMKilled:      details.State.OOMKilled,
-		ContainerError: details.State.Error,
+		ID:                 id,
+		Name:               labels[nameLabel],
+		URL:                s.previewURL(id),
+		Status:             details.State.Status,
+		ContainerID:        details.ID,
+		Image:              image,
+		Port:               parsePort(labels[portLabel]),
+		CreatedAt:          createdAt,
+		OOMKilled:          details.State.OOMKilled,
+		ContainerError:     details.State.Error,
+		HibernationEnabled: hibernationEnabled,
+		HibernationState:   hibernationState,
 	}
 	if startedAt := parseTime(details.State.StartedAt); !startedAt.IsZero() {
 		deployment.StartedAt = &startedAt

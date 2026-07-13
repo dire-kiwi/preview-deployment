@@ -53,7 +53,15 @@ func main() {
 		logger.Warn("could not initialize preview hibernation state", "error", err)
 	}
 	hibernationCancel()
-	httpAPI := api.New(service, dockerClient, logger, cfg.MaxUploadBytes, cfg.MaxBinaryBytes, cfg.APIToken)
+	httpAPI := api.New(
+		service,
+		dockerClient,
+		logger,
+		cfg.MaxUploadBytes,
+		cfg.MaxBinaryBytes,
+		cfg.APIToken,
+		api.WithDashboardControls(cfg.DashboardToken, cfg.DashboardOrigin),
+	)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           httpAPI.Handler(),

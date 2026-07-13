@@ -652,21 +652,61 @@ func sameManagedPreviews(left, right managedPreviewSnapshot) bool {
 	return true
 }
 
-func (m *stackManager) waitForStackHealth(ctx context.Context, config stackConfig, files []string, version string) error {
+func (m *stackManager) waitForStackHealth(ctx context.Context, config stackConfig, files []string, version string) (platformInspection, error) {
+	healthCtx, cancel := context.WithTimeout(ctx, m.healthTimeout)
+	defer cancel()
 	deadline := m.now().Add(m.healthTimeout)
 	var lastErr error
 	for {
-		lastErr = m.runCompose(ctx, config, files, version, "exec", "--no-TTY", "orchestrator", "/usr/local/bin/orchestrator", "healthcheck")
-		if lastErr == nil {
-			return nil
+		attemptErr := m.runCompose(healthCtx, config, files, version, "exec", "--no-TTY", "orchestrator", "/usr/local/bin/orchestrator", "healthcheck")
+		if attemptErr == nil {
+			inspection, inspectErr := m.inspectPlatform(healthCtx, config, files, version)
+			switch {
+			case inspectErr != nil:
+				attemptErr = fmt.Errorf("inspect platform readiness: %w", inspectErr)
+			case !inspection.running || inspection.health != "healthy" || !inspection.routerRunning:
+				attemptErr = fmt.Errorf(
+					"orchestrator state is running=%t health=%s router_running=%t",
+					inspection.running,
+					inspection.health,
+					inspection.routerRunning,
+				)
+			default:
+				return inspection, nil
+			}
+		}
+		if attemptErr != nil && (healthCtx.Err() == nil || lastErr == nil) {
+			lastErr = attemptErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return platformInspection{}, ctxErr
+		}
+		if healthErr := healthCtx.Err(); healthErr != nil {
+			return platformInspection{}, stackHealthTimeoutError(m.healthTimeout, lastErr, healthErr)
 		}
 		if !m.now().Before(deadline) {
-			return fmt.Errorf("orchestrator did not become healthy within %s: %w", m.healthTimeout, lastErr)
+			return platformInspection{}, stackHealthTimeoutError(m.healthTimeout, lastErr, nil)
 		}
-		if err := m.sleep(ctx, m.healthInterval); err != nil {
-			return err
+		if err := m.sleep(healthCtx, m.healthInterval); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return platformInspection{}, ctxErr
+			}
+			if healthErr := healthCtx.Err(); healthErr != nil {
+				return platformInspection{}, stackHealthTimeoutError(m.healthTimeout, lastErr, healthErr)
+			}
+			return platformInspection{}, err
 		}
 	}
+}
+
+func stackHealthTimeoutError(timeout time.Duration, lastErr, deadlineErr error) error {
+	if lastErr == nil {
+		lastErr = deadlineErr
+	}
+	if deadlineErr != nil && !errors.Is(lastErr, deadlineErr) {
+		return fmt.Errorf("orchestrator did not become healthy within %s: %v (deadline: %w)", timeout, lastErr, deadlineErr)
+	}
+	return fmt.Errorf("orchestrator did not become healthy within %s: %w", timeout, lastErr)
 }
 
 func (m *stackManager) inspectPlatform(ctx context.Context, config stackConfig, files []string, version string) (platformInspection, error) {
@@ -739,10 +779,7 @@ func (m *stackManager) inspectPlatform(ctx context.Context, config stackConfig, 
 }
 
 func (m *stackManager) verifyStack(ctx context.Context, config stackConfig, files []string, version string, expected managedPreviewSnapshot) (managedPreviewSnapshot, error) {
-	if err := m.waitForStackHealth(ctx, config, files, version); err != nil {
-		return managedPreviewSnapshot{}, err
-	}
-	inspection, err := m.inspectPlatform(ctx, config, files, version)
+	inspection, err := m.waitForStackHealth(ctx, config, files, version)
 	if err != nil {
 		return managedPreviewSnapshot{}, err
 	}

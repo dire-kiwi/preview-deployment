@@ -25,7 +25,9 @@ func TestDashboardTemplateEscapesAndShowsDeployments(t *testing.T) {
 				StatusDetail: "Up 2 minutes", Port: 8080, CreatedAt: time.Date(2026, 7, 13, 1, 2, 3, 0, time.UTC),
 				HibernationEnabled: true, HibernationState: orchestrator.HibernationStateActive,
 			},
-			CSRFToken: "csrf-token", CanHibernate: true,
+			CSRFToken:          "csrf-token",
+			CanHibernate:       true,
+			PreviewActionLabel: "Open preview",
 		}},
 		GeneratedAt:     "01:02:03 UTC",
 		ControlsEnabled: true,
@@ -36,7 +38,7 @@ func TestDashboardTemplateEscapesAndShowsDeployments(t *testing.T) {
 	html := output.String()
 	for _, expected := range []string{
 		"Preview deployments", "abc123abc123", "https://abc123abc123.preview.example.test",
-		"status-running", "Active", "Up 2 minutes", "<strong>1</strong>deployment",
+		"status-running", "Active", "Up 2 minutes", "<strong>1</strong>deployment", "Open preview",
 		`action="/dashboard/hibernate"`, `name="csrf" value="csrf-token"`, "Hibernate now",
 	} {
 		if !strings.Contains(html, expected) {
@@ -49,11 +51,12 @@ func TestDashboardTemplateEscapesAndShowsDeployments(t *testing.T) {
 }
 
 func TestDashboardTemplateShowsHibernatedAndLegacyStatesWithoutControls(t *testing.T) {
+	a := &API{}
 	var output bytes.Buffer
 	err := dashboardTemplate.Execute(&output, dashboardData{
 		Deployments: []dashboardDeployment{
-			{Deployment: orchestrator.Deployment{ID: "abc123abc123", Status: "exited", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateHibernated}},
-			{Deployment: orchestrator.Deployment{ID: "def456def456", Status: "running", HibernationState: orchestrator.HibernationStateUnavailable}},
+			a.dashboardCard(orchestrator.Deployment{ID: "abc123abc123", Status: "exited", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateHibernated}),
+			a.dashboardCard(orchestrator.Deployment{ID: "def456def456", Status: "running", HibernationState: orchestrator.HibernationStateUnavailable}),
 		},
 		GeneratedAt: "01:02:03 UTC",
 	})
@@ -66,8 +69,77 @@ func TestDashboardTemplateShowsHibernatedAndLegacyStatesWithoutControls(t *testi
 			t.Errorf("dashboard does not contain %q", expected)
 		}
 	}
-	if strings.Contains(html, "Hibernate now") || strings.Contains(html, "csrf-token") {
+	if strings.Contains(html, "Hibernate now") || strings.Contains(html, "csrf-token") || strings.Contains(html, "Redeploy this preview") {
 		t.Fatal("dashboard rendered controls for a non-active or legacy preview")
+	}
+}
+
+func TestDashboardCardsMakeControlEligibilityExplicit(t *testing.T) {
+	a := &API{dashboardControlsEnabled: true}
+	tests := []struct {
+		name          string
+		deployment    orchestrator.Deployment
+		previewAction string
+		controlLabel  string
+		controlHint   string
+		canHibernate  bool
+		wantCSRF      bool
+	}{
+		{
+			name: "active", deployment: orchestrator.Deployment{ID: "abc123abc123", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateActive},
+			previewAction: "Open preview", canHibernate: true, wantCSRF: true,
+		},
+		{
+			name: "hibernated", deployment: orchestrator.Deployment{ID: "def456def456", URL: "https://def456def456.preview.example.test", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateHibernated},
+			previewAction: "Resume preview", controlLabel: "Already hibernated", controlHint: "Opening the preview safely wakes the same container.",
+		},
+		{
+			name: "hibernating", deployment: orchestrator.Deployment{ID: "0123456789ab", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateHibernating},
+			previewAction: "Open preview", controlLabel: "Hibernating…", controlHint: "A request that arrives during shutdown will resume this preview.",
+		},
+		{
+			name: "resuming", deployment: orchestrator.Deployment{ID: "123456789abc", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateResuming},
+			previewAction: "Open preview", controlLabel: "Resuming…", controlHint: "The preview will become available after its application starts.",
+		},
+		{
+			name: "legacy", deployment: orchestrator.Deployment{ID: "23456789abcd", HibernationState: orchestrator.HibernationStateUnavailable},
+			previewAction: "Open preview", controlLabel: "Hibernation unavailable", controlHint: "Redeploy this preview to enable safe request-driven wake-up.",
+		},
+		{
+			name: "unrecoverable", deployment: orchestrator.Deployment{ID: "3456789abcde", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateUnavailable},
+			previewAction: "Open preview", controlLabel: "Hibernation unavailable", controlHint: "Inspect this preview's Docker state before trying again.",
+		},
+	}
+
+	cards := make([]dashboardDeployment, 0, len(tests))
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			card := a.dashboardCard(test.deployment)
+			cards = append(cards, card)
+			if card.PreviewActionLabel != test.previewAction || card.ControlLabel != test.controlLabel || card.ControlHint != test.controlHint || card.CanHibernate != test.canHibernate {
+				t.Fatalf("dashboardCard() = %#v", card)
+			}
+			if (card.CSRFToken != "") != test.wantCSRF {
+				t.Fatalf("CSRF presence = %t, want %t", card.CSRFToken != "", test.wantCSRF)
+			}
+		})
+	}
+
+	var output bytes.Buffer
+	if err := dashboardTemplate.Execute(&output, dashboardData{Deployments: cards, ControlsEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	for _, expected := range []string{`href="https://def456def456.preview.example.test"`, "Resume preview", "Already hibernated", "Hibernating…", "Resuming…", "Hibernation unavailable", "Redeploy this preview to enable safe request-driven wake-up."} {
+		if !strings.Contains(html, expected) {
+			t.Errorf("dashboard does not contain %q", expected)
+		}
+	}
+	if got := strings.Count(html, `action="/dashboard/hibernate"`); got != 1 {
+		t.Errorf("hibernate forms = %d, want 1", got)
+	}
+	if got := strings.Count(html, `name="csrf"`); got != 1 {
+		t.Errorf("CSRF fields = %d, want 1", got)
 	}
 }
 
@@ -81,6 +153,9 @@ func TestDashboardSecurityHeaders(t *testing.T) {
 	}
 	if got := header.Get("Content-Security-Policy"); !strings.Contains(got, "form-action 'self'") || strings.Contains(got, "script-src") {
 		t.Fatalf("Content-Security-Policy = %q", got)
+	}
+	if got := header.Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("Referrer-Policy = %q, want same-origin", got)
 	}
 }
 
@@ -171,6 +246,7 @@ func TestDashboardHibernateValidatesOriginAndCSRFThenRedirects(t *testing.T) {
 		csrf   string
 	}{
 		{name: "missing origin", csrf: a.dashboardCSRFToken(id)},
+		{name: "opaque origin", origin: "null", csrf: a.dashboardCSRFToken(id)},
 		{name: "sibling preview origin", origin: "https://abc123abc123.preview.example.test", csrf: a.dashboardCSRFToken(id)},
 		{name: "wrong CSRF", origin: origin, csrf: strings.Repeat("0", 64)},
 		{name: "token for another preview", origin: origin, id: "def456def456", csrf: a.dashboardCSRFToken(id)},
@@ -187,6 +263,13 @@ func TestDashboardHibernateValidatesOriginAndCSRFThenRedirects(t *testing.T) {
 				t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
 			}
 		})
+	}
+	duplicateOrigin := dashboardHibernateRequest(t, token, origin, id, a.dashboardCSRFToken(id))
+	duplicateOrigin.Header.Add("Origin", origin)
+	duplicateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateResponse, duplicateOrigin)
+	if duplicateResponse.Code != http.StatusForbidden {
+		t.Fatalf("duplicate Origin status = %d, want %d", duplicateResponse.Code, http.StatusForbidden)
 	}
 	if calls != 1 {
 		t.Fatalf("hibernate calls after rejected requests = %d, want 1", calls)

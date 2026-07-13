@@ -342,8 +342,11 @@ means the container predates hibernation support, was deployed while
 hibernation was disabled, or is currently in an unrecoverable/transitional
 Docker state such as paused, dead, or removing. The dashboard will not stop a
 preview unless it has a safe request-driven wake route and a stoppable state.
-Redeploy legacy previews to opt in; inspect Docker when an opted-in preview is
-unexpectedly unavailable.
+Every authenticated card explains its available action: active capable previews
+show **Hibernate now**, hibernated previews show **Resume preview**, transitional
+states show progress, and legacy previews show **Hibernation unavailable** with
+a prompt to redeploy. Redeploy legacy previews to opt in; inspect Docker when an
+opted-in preview is unexpectedly unavailable.
 
 To enable the **Hibernate now** button, configure a dedicated dashboard token
 and the exact browser origin:
@@ -362,8 +365,11 @@ rejected at startup if it matches `API_TOKEN`, is never embedded in the page,
 and should be stored with the same care as any control-plane credential. Each
 button uses a per-preview HMAC CSRF token, and
 the server rejects requests whose `Origin` does not exactly match
-`DASHBOARD_ORIGIN`. The released Traefik configuration exposes only the exact
-dashboard root and hibernation POST; `/v1` remains private.
+`DASHBOARD_ORIGIN`. The dashboard uses `Referrer-Policy: same-origin` so a basic
+same-origin form POST retains that exact `Origin` without sending referrer data
+to other origins. Missing, opaque, duplicate, and foreign origins remain
+rejected. The released Traefik configuration exposes only the exact dashboard
+root and hibernation POST; `/v1` remains private.
 
 The stopped-container hook requires Traefik 3.6 or newer; the supplied Compose
 file pins a compatible release. Because ForwardAuth observes every request,

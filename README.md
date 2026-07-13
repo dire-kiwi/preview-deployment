@@ -146,6 +146,24 @@ npm run build
 previewctl deploy --manifest preview.json --output json .
 ```
 
+Upload files or database snapshots separately when they should be refreshed
+without rebuilding the deployment archive. Asset uploads accept ZIP, `.tar.gz`,
+and `.tgz`; uploading the same lowercase ID atomically replaces its previous
+snapshot instead of merging files:
+
+```sh
+previewctl assets upload --id checkout-demo latest-database.tar.gz
+previewctl deploy --asset-id checkout-demo --manifest preview.json .
+```
+
+The ID links the upload to the deployment and isolates it from every other asset
+namespace. At preview creation time, the orchestrator opens one stable version
+of the latest snapshot and copies it into the new container at
+`/home/preview/assets` before starting it. The same location is exported as
+`PREVIEW_ASSETS_DIR`. Files are owned by the preview user, so database files can
+be modified inside that preview. Later uploads affect only future previews;
+already-created previews keep their private copy.
+
 Open the deployment dashboard at the orchestrator's root URL, such as
 `https://api.preview.example.com/`. It reports each preview's container and
 hibernation state. Manual controls are hidden unless the separately
@@ -302,7 +320,8 @@ curl --fail-with-body -H 'Content-Type: application/zip' \
 |---|---|---|
 | `GET` | `/` | Deployment and hibernation-state dashboard |
 | `POST` | `/dashboard/hibernate` | Authenticated, CSRF-protected dashboard hibernation action |
-| `POST` | `/v1/deployments` | Upload, build, create, and start |
+| `PUT` | `/v1/assets/{asset_id}` | Atomically replace the latest ZIP or tar.gz asset snapshot for an ID |
+| `POST` | `/v1/deployments?asset_id={asset_id}` | Upload, build, create, copy optional assets, and start |
 | `GET` | `/v1/deployments` | List managed deployments |
 | `GET` | `/v1/deployments/{id}` | Inspect one deployment |
 | `POST` | `/v1/deployments/{id}/stop` | Stop it |
@@ -454,7 +473,11 @@ an executable ephemeral `/home/preview` workspace, all Linux capabilities droppe
 `no-new-privileges`, no host ports, and CPU, memory, PID, log-size, and
 deployment-count limits. Dockerfile and runtime images retain their entrypoint
 and working directory but cannot declare volumes. Runtime payloads use the
-managed read-only file bind described above; the only user-selectable host mount
-is the explicit read-only Codex auth opt-in described above.
+managed read-only file bind described above. Uploaded asset snapshots are
+validated without host extraction, stored beneath the root-only payload
+directory, and copied into each preview's writable tmpfs before start. Their
+expanded size is limited by both `MAX_BINARY_MB` and `PREVIEW_TMPFS_MB`. The only
+user-selectable host mount is the explicit read-only Codex auth opt-in described
+above.
 
 The platform still executes uploaded code. The orchestrator's Docker socket access is effectively host-root access even though the socket mount is read-only. Before allowing untrusted users or remote traffic, use a dedicated host or isolated Docker daemon, terminate TLS, set `API_TOKEN`, restrict egress, and consider a tightly scoped Docker socket proxy. Preview filesystems are ephemeral; application data and volumes are not persisted.

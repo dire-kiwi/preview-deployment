@@ -126,6 +126,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       <dl>
         <dt>ID</dt><dd><code>{{.ID}}</code></dd>
+        {{if .AssetID}}<dt>Assets</dt><dd><code>{{.AssetID}}</code></dd>{{end}}
         <dt>Hibernation</dt><dd>{{hibernationLabel .HibernationState}}</dd>
         <dt>Port</dt><dd>{{.Port}}</dd>
         <dt>Created</dt><dd>{{createdTime .CreatedAt}}</dd>

@@ -32,6 +32,15 @@ type Deployment struct {
 	ExitCode       *int       `json:"exit_code,omitempty"`
 	OOMKilled      bool       `json:"oom_killed,omitempty"`
 	ContainerError string     `json:"container_error,omitempty"`
+	AssetID        string     `json:"asset_id,omitempty"`
+}
+
+// AssetSnapshot is returned after atomically publishing an asset upload.
+type AssetSnapshot struct {
+	ID        string    `json:"id"`
+	Size      int64     `json:"size"`
+	SHA256    string    `json:"sha256"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type deploymentList struct {
@@ -107,6 +116,10 @@ func NewClient(rawURL, token, userAgent string, timeout time.Duration) (*Client,
 }
 
 func (c *Client) Deploy(ctx context.Context, archivePath string) (Deployment, error) {
+	return c.DeployWithAssets(ctx, archivePath, "")
+}
+
+func (c *Client) DeployWithAssets(ctx context.Context, archivePath, assetID string) (Deployment, error) {
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		return Deployment{}, fmt.Errorf("open archive: %w", err)
@@ -120,9 +133,39 @@ func (c *Client) Deploy(ctx context.Context, archivePath string) (Deployment, er
 		return Deployment{}, errors.New("deployment archive must be a regular file")
 	}
 
+	requestPath := "/v1/deployments"
+	if assetID != "" {
+		requestPath += "?asset_id=" + url.QueryEscape(assetID)
+	}
 	var deployment Deployment
-	err = c.do(ctx, http.MethodPost, "/v1/deployments", archive, info.Size(), "application/zip", http.StatusCreated, &deployment)
+	err = c.do(ctx, http.MethodPost, requestPath, archive, info.Size(), "application/zip", http.StatusCreated, &deployment)
 	return deployment, err
+}
+
+// UploadAssets atomically replaces the latest asset snapshot for id.
+func (c *Client) UploadAssets(ctx context.Context, id, archivePath string) (AssetSnapshot, error) {
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return AssetSnapshot{}, fmt.Errorf("open asset archive: %w", err)
+	}
+	defer archive.Close()
+	info, err := archive.Stat()
+	if err != nil {
+		return AssetSnapshot{}, fmt.Errorf("inspect asset archive: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return AssetSnapshot{}, errors.New("asset archive must be a regular file")
+	}
+	contentType := "application/octet-stream"
+	lower := strings.ToLower(archivePath)
+	if strings.HasSuffix(lower, ".zip") {
+		contentType = "application/zip"
+	} else if strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") {
+		contentType = "application/gzip"
+	}
+	var snapshot AssetSnapshot
+	err = c.do(ctx, http.MethodPut, "/v1/assets/"+url.PathEscape(id), archive, info.Size(), contentType, http.StatusOK, &snapshot)
+	return snapshot, err
 }
 
 func (c *Client) List(ctx context.Context) ([]Deployment, error) {

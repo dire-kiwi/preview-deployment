@@ -361,6 +361,31 @@ func TestCreateContainerBindMountsRuntimePayloadReadOnly(t *testing.T) {
 	}
 }
 
+func TestCopyArchiveToContainerUsesDockerArchiveAPI(t *testing.T) {
+	client := &Client{
+		apiVersion: "1.44",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodPut || request.URL.Path != "/v1.44/containers/container-id/archive" {
+				t.Errorf("request = %s %s", request.Method, request.URL.Path)
+			}
+			if request.URL.Query().Get("path") != "/home/preview" || request.Header.Get("Content-Type") != "application/x-tar" {
+				t.Errorf("archive request = %s %#v", request.URL.RawQuery, request.Header)
+			}
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				return nil, err
+			}
+			if string(body) != "tar contents" {
+				t.Errorf("body = %q", body)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+		})},
+	}
+	if err := client.CopyArchiveToContainer(context.Background(), "container-id", "/home/preview", strings.NewReader("tar contents")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInspectImageReadsDeclaredVolumes(t *testing.T) {
 	client := &Client{
 		apiVersion: "1.44",

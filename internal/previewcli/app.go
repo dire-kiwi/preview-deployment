@@ -124,6 +124,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 	switch command {
 	case "deploy":
 		return a.runDeploy(ctx, client, commandArgs)
+	case "assets":
+		return a.runAssets(ctx, client, commandArgs)
 	case "list", "ls":
 		return a.runList(ctx, client, commandArgs)
 	case "get":
@@ -168,7 +170,7 @@ func (a *app) parseGlobal(args []string) (globalOptions, []string, error) {
 }
 
 func (a *app) runDeploy(ctx context.Context, client *Client, args []string) error {
-	const usage = `Usage: previewctl [global flags] deploy [--manifest FILE] [--output text|json] SOURCE
+	const usage = `Usage: previewctl [global flags] deploy [--manifest FILE] [--asset-id ID] [--output text|json] SOURCE
 
 SOURCE may be an existing deployment ZIP, an executable, or a directory.
 Executables are packaged as root-level app. Directories are packaged into one
@@ -178,6 +180,7 @@ preview.json manifest may be supplied with either generated ZIP form.
 `
 	flags := newCommandFlags("deploy")
 	manifest := flags.String("manifest", "", "preview.json to package with an executable or directory")
+	assetID := flags.String("asset-id", "", "copy the latest uploaded assets for ID into this preview")
 	output := flags.String("output", "text", "output format: text or json")
 	if err := parseCommandFlags(flags, args, usage); err != nil {
 		return err
@@ -193,11 +196,46 @@ preview.json manifest may be supplied with either generated ZIP form.
 		return err
 	}
 	defer cleanup()
-	deployment, err := client.Deploy(ctx, archive)
+	deployment, err := client.DeployWithAssets(ctx, archive, *assetID)
 	if err != nil {
 		return err
 	}
 	return a.printDeployment(deployment, *output)
+}
+
+func (a *app) runAssets(ctx context.Context, client *Client, args []string) error {
+	const usage = `Usage: previewctl [global flags] assets upload --id ID [--output text|json] ARCHIVE
+
+ARCHIVE must be a ZIP, .tar.gz, or .tgz file. Uploading the same ID atomically
+replaces its latest snapshot; existing previews keep their copied version.
+`
+	if len(args) == 0 || args[0] != "upload" {
+		return usageError("assets requires the upload subcommand", usage)
+	}
+	flags := newCommandFlags("assets upload")
+	id := flags.String("id", "", "asset namespace shared with deploy --asset-id")
+	output := flags.String("output", "text", "output format: text or json")
+	if err := parseCommandFlags(flags, args[1:], usage); err != nil {
+		return err
+	}
+	if *id == "" {
+		return usageError("assets upload requires --id", usage)
+	}
+	if flags.NArg() != 1 {
+		return usageError("assets upload requires exactly one ARCHIVE", usage)
+	}
+	if err := validateOutput(*output, "text", "json"); err != nil {
+		return usageError(err.Error(), usage)
+	}
+	snapshot, err := client.UploadAssets(ctx, *id, flags.Arg(0))
+	if err != nil {
+		return err
+	}
+	if *output == "json" {
+		return writeJSON(a.streams.Out, snapshot)
+	}
+	_, err = fmt.Fprintf(a.streams.Out, "Uploaded latest assets for %s (%d bytes, sha256:%s)\n", snapshot.ID, snapshot.Size, snapshot.SHA256)
+	return err
 }
 
 func (a *app) runList(ctx context.Context, client *Client, args []string) error {
@@ -651,6 +689,9 @@ func (a *app) printDeployment(deployment Deployment, output string) error {
 	if deployment.Name != "" {
 		fmt.Fprintf(writer, "NAME\t%s\n", deployment.Name)
 	}
+	if deployment.AssetID != "" {
+		fmt.Fprintf(writer, "ASSETS\t%s\n", deployment.AssetID)
+	}
 	fmt.Fprintf(writer, "STATUS\t%s\nURL\t%s\n", deployment.Status, deployment.URL)
 	return writer.Flush()
 }
@@ -685,7 +726,8 @@ func (a *app) userAgent() string {
 
 func (a *app) printCommandHelp(command string) error {
 	usages := map[string]string{
-		"deploy":      "Usage: previewctl [global flags] deploy [--manifest FILE] [--output text|json] SOURCE\n",
+		"deploy":      "Usage: previewctl [global flags] deploy [--manifest FILE] [--asset-id ID] [--output text|json] SOURCE\n",
+		"assets":      "Usage: previewctl [global flags] assets upload --id ID [--output text|json] ARCHIVE\n",
 		"list":        "Usage: previewctl [global flags] list [--output table|json]\n",
 		"get":         "Usage: previewctl [global flags] get [--output text|json] ID\n",
 		"start":       "Usage: previewctl start [stack flags]\n       previewctl [global flags] start [--output text|json] ID\n",
@@ -792,6 +834,7 @@ Usage:
 
 Commands:
   deploy    Upload a ZIP or package an executable or source directory
+  assets    Upload the latest ZIP or tar.gz asset snapshot for an ID
   list      List deployments
   get       Show one deployment
   logs      Read deployment logs

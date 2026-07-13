@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dire-kiwi/preview-deployment/internal/assets"
 	"github.com/dire-kiwi/preview-deployment/internal/bundle"
 	"github.com/dire-kiwi/preview-deployment/internal/docker"
 	"github.com/dire-kiwi/preview-deployment/internal/orchestrator"
@@ -96,6 +97,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /internal/previews/{id}/activity", a.previewActivity)
 	mux.HandleFunc("GET /v1/deployments", a.listDeployments)
 	mux.HandleFunc("POST /v1/deployments", a.createDeployment)
+	mux.HandleFunc("PUT /v1/assets/{id}", a.replaceAssets)
 	mux.HandleFunc("GET /v1/deployments/{id}", a.getDeployment)
 	mux.HandleFunc("DELETE /v1/deployments/{id}", a.deleteDeployment)
 	mux.HandleFunc("POST /v1/deployments/{id}/start", a.startDeployment)
@@ -209,6 +211,11 @@ func (a *API) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) createDeployment(w http.ResponseWriter, r *http.Request) {
+	assetID := r.URL.Query().Get("asset_id")
+	if assetID != "" && !assets.ValidID(assetID) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_asset_id", "asset_id must be a lowercase identifier of at most 64 characters")
+		return
+	}
 	filename, err := receiveArchive(w, r, a.maxUploadBytes)
 	if err != nil {
 		switch {
@@ -233,12 +240,50 @@ func (a *API) createDeployment(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid_archive", err.Error())
 		return
 	}
-	deployment, err := a.service.Deploy(r.Context(), deploymentBundle)
+	deployment, err := a.service.DeployWithAssets(r.Context(), deploymentBundle, assetID)
 	if err != nil {
 		a.writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, deployment)
+}
+
+func (a *API) replaceAssets(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+	if !assets.ValidID(assetID) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_asset_id", "asset ID must be a lowercase identifier of at most 64 characters")
+		return
+	}
+	filename, err := receiveUpload(w, r, a.maxUploadBytes, true)
+	if err != nil {
+		switch {
+		case errors.Is(err, errUploadTooLarge):
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "upload_too_large", fmt.Sprintf("archive must not exceed %d bytes", a.maxUploadBytes))
+		case errors.Is(err, errArchivePartMissing), errors.Is(err, errArchivePartDuplicate):
+			writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		case errors.Is(err, errUnsupportedMediaType):
+			writeAPIError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", err.Error())
+		default:
+			a.logger.Error("could not receive asset upload", "asset_id", assetID, "error", err)
+			writeAPIError(w, http.StatusInternalServerError, "upload_storage_failed", "could not store upload")
+		}
+		return
+	}
+	defer os.Remove(filename)
+	snapshot, err := a.service.ReplaceAssets(r.Context(), assetID, filename)
+	if err != nil {
+		switch {
+		case errors.Is(err, assets.ErrInvalidArchive):
+			writeAPIError(w, http.StatusBadRequest, "invalid_archive", err.Error())
+		case errors.Is(err, context.Canceled):
+			writeAPIError(w, 499, "request_canceled", "request was canceled")
+		default:
+			a.logger.Error("could not publish asset upload", "asset_id", assetID, "error", err)
+			writeAPIError(w, http.StatusInternalServerError, "asset_storage_failed", "could not publish asset snapshot")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (a *API) listDeployments(w http.ResponseWriter, r *http.Request) {
@@ -316,6 +361,10 @@ func (a *API) writeServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, orchestrator.ErrNotFound):
 		writeAPIError(w, http.StatusNotFound, "not_found", "deployment not found")
+	case errors.Is(err, orchestrator.ErrAssetsNotFound):
+		writeAPIError(w, http.StatusNotFound, "assets_not_found", "no asset snapshot exists for asset_id")
+	case errors.Is(err, assets.ErrInvalidID):
+		writeAPIError(w, http.StatusBadRequest, "invalid_asset_id", "asset_id is invalid")
 	case errors.Is(err, orchestrator.ErrCapacity):
 		writeAPIError(w, http.StatusConflict, "capacity_reached", err.Error())
 	case errors.Is(err, context.DeadlineExceeded):
@@ -329,15 +378,19 @@ func (a *API) writeServiceError(w http.ResponseWriter, err error) {
 }
 
 func receiveArchive(w http.ResponseWriter, r *http.Request, maxBytes int64) (string, error) {
+	return receiveUpload(w, r, maxBytes, false)
+}
+
+func receiveUpload(w http.ResponseWriter, r *http.Request, maxBytes int64, allowGzip bool) (string, error) {
 	// Leave room for multipart headers while independently enforcing the exact
 	// archive-byte limit during the copy.
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+1024*1024)
 	mediaType, parameters, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil {
-		return "", fmt.Errorf("%w: Content-Type must be multipart/form-data or application/zip", errUnsupportedMediaType)
+		return "", fmt.Errorf("%w: Content-Type must identify a supported archive", errUnsupportedMediaType)
 	}
 
-	temporary, err := os.CreateTemp("", "preview-upload-*.zip")
+	temporary, err := os.CreateTemp("", "preview-upload-*.archive")
 	if err != nil {
 		return "", fmt.Errorf("%w: create file: %v", errTemporaryStorage, err)
 	}
@@ -352,6 +405,13 @@ func receiveArchive(w http.ResponseWriter, r *http.Request, maxBytes int64) (str
 
 	switch mediaType {
 	case "application/zip", "application/octet-stream":
+		if err := copyBounded(temporary, r.Body, maxBytes); err != nil {
+			return "", err
+		}
+	case "application/gzip", "application/x-gzip":
+		if !allowGzip {
+			return "", fmt.Errorf("%w %q; deployment archives must be ZIP files", errUnsupportedMediaType, mediaType)
+		}
 		if err := copyBounded(temporary, r.Body, maxBytes); err != nil {
 			return "", err
 		}
@@ -393,6 +453,9 @@ func receiveArchive(w http.ResponseWriter, r *http.Request, maxBytes int64) (str
 			return "", errArchivePartMissing
 		}
 	default:
+		if allowGzip {
+			return "", fmt.Errorf("%w %q; use multipart/form-data, application/zip, or application/gzip", errUnsupportedMediaType, mediaType)
+		}
 		return "", fmt.Errorf("%w %q; use multipart/form-data or application/zip", errUnsupportedMediaType, mediaType)
 	}
 

@@ -7,13 +7,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dire-kiwi/preview-deployment/internal/assets"
 	"github.com/dire-kiwi/preview-deployment/internal/bundle"
 	"github.com/dire-kiwi/preview-deployment/internal/config"
 	"github.com/dire-kiwi/preview-deployment/internal/docker"
@@ -28,6 +31,7 @@ const (
 	imageOwnedLabel  = "com.preview-deployment.image-owned"
 	payloadLabel     = "com.preview-deployment.payload"
 	payloadHashLabel = "com.preview-deployment.payload-sha256"
+	assetIDLabel     = "com.preview-deployment.asset-id"
 	nameLabel        = "com.preview-deployment.name"
 	hibernationLabel = "com.preview-deployment.hibernation"
 	wakeTokenLabel   = "com.preview-deployment.wake-token"
@@ -38,6 +42,7 @@ const (
 
 var (
 	ErrNotFound               = errors.New("deployment not found")
+	ErrAssetsNotFound         = errors.New("asset snapshot not found")
 	ErrCapacity               = errors.New("deployment capacity reached")
 	ErrHibernationUnavailable = errors.New("deployment does not support hibernation")
 )
@@ -68,6 +73,7 @@ type Deployment struct {
 	ContainerError     string     `json:"container_error,omitempty"`
 	HibernationEnabled bool       `json:"hibernation_enabled"`
 	HibernationState   string     `json:"hibernation_state"`
+	AssetID            string     `json:"asset_id,omitempty"`
 }
 
 // Service coordinates builds and lifecycle operations with Docker.
@@ -76,6 +82,7 @@ type Service struct {
 	config   config.Config
 	logger   *slog.Logger
 	buildSem chan struct{}
+	assets   *assets.Store
 
 	activityMu          sync.Mutex
 	activity            map[string]*previewActivity
@@ -108,10 +115,19 @@ type dockerClient interface {
 	InspectContainer(context.Context, string) (docker.ContainerDetails, error)
 	ListContainers(context.Context, map[string]string) ([]docker.ContainerSummary, error)
 	ContainerLogs(context.Context, string, int, int64) ([]byte, bool, error)
+	CopyArchiveToContainer(context.Context, string, string, io.Reader) error
 }
 
 func New(dockerClient *docker.Client, cfg config.Config, logger *slog.Logger) (*Service, error) {
 	if err := validatePayloadDirectory(cfg.PayloadDir); err != nil {
+		return nil, err
+	}
+	assetLimit := cfg.MaxBinaryBytes
+	if cfg.PreviewTmpfsBytes > 0 && cfg.PreviewTmpfsBytes < assetLimit {
+		assetLimit = cfg.PreviewTmpfsBytes
+	}
+	assetStore, err := assets.NewStore(filepath.Join(cfg.PayloadDir, "assets"), assetLimit)
+	if err != nil {
 		return nil, err
 	}
 	return &Service{
@@ -119,6 +135,7 @@ func New(dockerClient *docker.Client, cfg config.Config, logger *slog.Logger) (*
 		config:         cfg,
 		logger:         logger,
 		buildSem:       make(chan struct{}, cfg.BuildConcurrency),
+		assets:         assetStore,
 		activity:       make(map[string]*previewActivity),
 		now:            time.Now,
 		resumeGrace:    defaultPreviewResumeGrace,
@@ -130,6 +147,38 @@ func New(dockerClient *docker.Client, cfg config.Config, logger *slog.Logger) (*
 // Deploy builds or selects an image, atomically publishes any runtime payload,
 // creates a sandboxed container with the required read-only bind, and starts it.
 func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (Deployment, error) {
+	return s.DeployWithAssets(ctx, deploymentBundle, "")
+}
+
+// ReplaceAssets atomically publishes the latest validated snapshot for assetID.
+func (s *Service) ReplaceAssets(ctx context.Context, assetID, filename string) (assets.Snapshot, error) {
+	if s.assets == nil {
+		return assets.Snapshot{}, errors.New("asset store is not configured")
+	}
+	return s.assets.Replace(ctx, assetID, filename)
+}
+
+// DeployWithAssets creates a preview with a stable copy of the latest snapshot
+// for assetID. Replacing the stored snapshot does not change existing previews.
+func (s *Service) DeployWithAssets(ctx context.Context, deploymentBundle bundle.Bundle, assetID string) (Deployment, error) {
+	var assetArchive io.ReadCloser
+	if assetID != "" {
+		if s.assets == nil {
+			return Deployment{}, errors.New("asset store is not configured")
+		}
+		opened, err := s.assets.Open(assetID)
+		if errors.Is(err, assets.ErrInvalidID) {
+			return Deployment{}, assets.ErrInvalidID
+		}
+		if errors.Is(err, assets.ErrNotFound) {
+			return Deployment{}, ErrAssetsNotFound
+		}
+		if err != nil {
+			return Deployment{}, err
+		}
+		assetArchive = opened
+		defer assetArchive.Close()
+	}
 	if deploymentBundle.BuildMode == bundle.BuildRuntime && deploymentBundle.Manifest.CodexAuth {
 		return Deployment{}, errors.New("runtime deployments do not support codex_auth")
 	}
@@ -248,13 +297,13 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 		payloadCreated = true
 	}
 
-	labels := s.labels(id, image, imageOwned, payloadHash, wakeToken, deploymentBundle.Manifest, createdAt)
+	labels := s.labels(id, image, imageOwned, payloadHash, wakeToken, assetID, deploymentBundle.Manifest, createdAt)
 	containerID, err = s.docker.CreateContainer(deployCtx, docker.CreateOptions{
 		Name:          containerName,
 		Image:         containerImage,
 		WorkingDir:    workingDirectory(deploymentBundle.BuildMode),
 		Args:          append([]string(nil), deploymentBundle.Manifest.Args...),
-		Env:           environment(deploymentBundle.Manifest),
+		Env:           environment(deploymentBundle.Manifest, assetID != ""),
 		Labels:        labels,
 		Port:          deploymentBundle.Manifest.Port,
 		Network:       s.config.DockerNetwork,
@@ -274,6 +323,12 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 	if err != nil {
 		cleanup()
 		return Deployment{}, err
+	}
+	if assetArchive != nil {
+		if err := s.docker.CopyArchiveToContainer(deployCtx, containerID, "/home/preview", assetArchive); err != nil {
+			cleanup()
+			return Deployment{}, fmt.Errorf("copy asset snapshot into preview: %w", err)
+		}
 	}
 	if err := s.docker.StartContainer(deployCtx, containerID); err != nil {
 		cleanup()
@@ -300,6 +355,7 @@ func (s *Service) Deploy(ctx context.Context, deploymentBundle bundle.Bundle) (D
 			CreatedAt:          createdAt,
 			HibernationEnabled: hibernationEnabled,
 			HibernationState:   hibernationState,
+			AssetID:            assetID,
 		}, nil
 	}
 
@@ -555,7 +611,7 @@ func (s *Service) lockPreviewLifecycle(id string) func() {
 	}
 }
 
-func (s *Service) labels(id, image string, imageOwned bool, payloadHash, wakeToken string, manifest bundle.Manifest, createdAt time.Time) map[string]string {
+func (s *Service) labels(id, image string, imageOwned bool, payloadHash, wakeToken, assetID string, manifest bundle.Manifest, createdAt time.Time) map[string]string {
 	router := "preview-" + id
 	labels := map[string]string{
 		managedLabel:    managedValue,
@@ -576,6 +632,9 @@ func (s *Service) labels(id, image string, imageOwned bool, payloadHash, wakeTok
 	if payloadHash != "" {
 		labels[payloadLabel] = id + ".zip"
 		labels[payloadHashLabel] = payloadHash
+	}
+	if assetID != "" {
+		labels[assetIDLabel] = assetID
 	}
 	if s.config.PublicScheme == "https" {
 		labels["traefik.http.routers."+router+".tls"] = "true"
@@ -600,17 +659,20 @@ func validImmutableImageID(value string) bool {
 	return err == nil
 }
 
-func environment(manifest bundle.Manifest) []string {
+func environment(manifest bundle.Manifest, hasAssets bool) []string {
 	keys := make([]string, 0, len(manifest.Env))
 	for key := range manifest.Env {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	environment := make([]string, 0, len(keys)+1)
+	environment := make([]string, 0, len(keys)+2)
 	for _, key := range keys {
 		environment = append(environment, key+"="+manifest.Env[key])
 	}
 	environment = append(environment, "PORT="+strconv.Itoa(manifest.Port))
+	if hasAssets {
+		environment = append(environment, "PREVIEW_ASSETS_DIR=/home/preview/assets")
+	}
 	return environment
 }
 
@@ -657,6 +719,7 @@ func (s *Service) fromSummary(container docker.ContainerSummary) Deployment {
 		CreatedAt:          createdAt,
 		HibernationEnabled: hibernationEnabled,
 		HibernationState:   hibernationState,
+		AssetID:            labels[assetIDLabel],
 	}
 }
 
@@ -685,6 +748,7 @@ func (s *Service) fromDetails(details docker.ContainerDetails) Deployment {
 		ContainerError:     details.State.Error,
 		HibernationEnabled: hibernationEnabled,
 		HibernationState:   hibernationState,
+		AssetID:            labels[assetIDLabel],
 	}
 	if startedAt := parseTime(details.State.StartedAt); !startedAt.IsZero() {
 		deployment.StartedAt = &startedAt

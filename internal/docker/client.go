@@ -469,6 +469,23 @@ func (c *Client) CreateContainer(ctx context.Context, options CreateOptions) (st
 	return result.ID, nil
 }
 
+// CopyArchiveToContainer expands a tar archive beneath an existing directory
+// in a created container. It is used before start so each preview gets an
+// independent, writable asset snapshot rather than a live host bind mount.
+func (c *Client) CopyArchiveToContainer(ctx context.Context, id, destination string, archive io.Reader) error {
+	query := url.Values{"path": []string{destination}}
+	headers := http.Header{"Content-Type": []string{"application/x-tar"}}
+	response, err := c.request(ctx, http.MethodPut, "/containers/"+id+"/archive", query, archive, true, headers)
+	if err != nil {
+		return fmt.Errorf("copy archive to container: %w", err)
+	}
+	defer response.Body.Close()
+	if err := checkResponse(response); err != nil {
+		return fmt.Errorf("copy archive to container: %w", err)
+	}
+	return nil
+}
+
 // ContainerSummary is returned by the Docker list endpoint.
 type ContainerSummary struct {
 	ID      string            `json:"Id"`

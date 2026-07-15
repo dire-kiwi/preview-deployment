@@ -37,9 +37,10 @@ func TestDashboardTemplateEscapesAndShowsDeployments(t *testing.T) {
 	}
 	html := output.String()
 	for _, expected := range []string{
-		"Preview deployments", "abc123abc123", "https://abc123abc123.preview.example.test",
-		"status-running", "Active", "Up 2 minutes", "<strong>1</strong>deployment", "Open preview",
-		`action="/dashboard/hibernate"`, `name="csrf" value="csrf-token"`, "Hibernate now",
+		"Preview deployments", "Deployment overview", "Dire Kiwi Cloud", "abc123abc123", "https://abc123abc123.preview.example.test",
+		"status-running", "Active", "Up 2 minutes", "1 resource", "Open preview", "Service details", "color-scheme:dark",
+		`action="/dashboard/hibernate"`, `name="csrf" value="csrf-token"`, ">Hibernate</button>",
+		`<noscript><meta http-equiv="refresh" content="10"></noscript>`, `src="/?asset=dashboard.js"`, `id="dashboard-state"`,
 	} {
 		if !strings.Contains(html, expected) {
 			t.Errorf("dashboard does not contain %q", expected)
@@ -64,7 +65,7 @@ func TestDashboardTemplateShowsHibernatedAndLegacyStatesWithoutControls(t *testi
 		t.Fatal(err)
 	}
 	html := output.String()
-	for _, expected := range []string{"Hibernated", "Unavailable", "Read-only view"} {
+	for _, expected := range []string{"Hibernated", "Unavailable", "Read only"} {
 		if !strings.Contains(html, expected) {
 			t.Errorf("dashboard does not contain %q", expected)
 		}
@@ -151,11 +152,89 @@ func TestDashboardSecurityHeaders(t *testing.T) {
 			t.Errorf("missing %s", name)
 		}
 	}
-	if got := header.Get("Content-Security-Policy"); !strings.Contains(got, "form-action 'self'") || strings.Contains(got, "script-src") {
-		t.Fatalf("Content-Security-Policy = %q", got)
+	policy := header.Get("Content-Security-Policy")
+	for _, directive := range []string{"form-action 'self'", "script-src 'self'", "connect-src 'self'"} {
+		if !strings.Contains(policy, directive) {
+			t.Fatalf("Content-Security-Policy %q does not contain %q", policy, directive)
+		}
 	}
 	if got := header.Get("Referrer-Policy"); got != "same-origin" {
 		t.Fatalf("Referrer-Policy = %q, want same-origin", got)
+	}
+}
+
+func TestDashboardRefreshRendersOnlyLiveState(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("X-Dashboard-Refresh", "1")
+	response := httptest.NewRecorder()
+	err := renderDashboardResponse(response, request, dashboardData{
+		Deployments: []dashboardDeployment{{
+			Deployment:         orchestrator.Deployment{ID: "abc123abc123", Name: "Live resource", URL: "https://abc123abc123.preview.example.test", Status: "running", HibernationState: orchestrator.HibernationStateActive},
+			PreviewActionLabel: "Open preview",
+		}},
+		GeneratedAt: "12:30:00 UTC",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`id="dashboard-state"`, `data-generated-at="12:30:00 UTC"`, "Live resource"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("dashboard refresh does not contain %q", expected)
+		}
+	}
+	for _, unexpected := range []string{"<!doctype html>", "Service details", "dashboard.js"} {
+		if strings.Contains(body, unexpected) {
+			t.Errorf("dashboard refresh unexpectedly contains %q", unexpected)
+		}
+	}
+	if got := response.Header().Get("Vary"); got != "X-Dashboard-Refresh" {
+		t.Errorf("Vary = %q, want X-Dashboard-Refresh", got)
+	}
+}
+
+func TestDashboardScriptAsset(t *testing.T) {
+	handler := New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, 1024, "").Handler()
+	request := httptest.NewRequest(http.MethodGet, "/?asset=dashboard.js", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("script status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Header().Get("Content-Type"); got != "text/javascript; charset=utf-8" {
+		t.Errorf("Content-Type = %q", got)
+	}
+	for _, expected := range []string{"window.fetch", "DOMParser", "dashboard-state", "visibilitychange"} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Errorf("dashboard script does not contain %q", expected)
+		}
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/?asset=unknown", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Errorf("unknown asset status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestDashboardScriptUsesDashboardAuthentication(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	handler := New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, 1024, "", WithDashboardControls(token, "https://api.preview.example.test")).Handler()
+
+	request := httptest.NewRequest(http.MethodGet, "/?asset=dashboard.js", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated script status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/?asset=dashboard.js", nil)
+	request.SetBasicAuth("preview", token)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "window.fetch") {
+		t.Fatalf("authenticated script response = (%d, %q)", response.Code, response.Body.String())
 	}
 }
 

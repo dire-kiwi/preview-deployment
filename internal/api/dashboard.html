@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <noscript><meta http-equiv="refresh" content="10"></noscript>
+  <title>Preview deployments · Dire Kiwi Cloud</title>
+  <script src="/?asset=dashboard.js" defer></script>
+  <style>
+    :root {
+      color-scheme:dark;
+      --shell:#080d15;
+      --topbar:#111823;
+      --sidebar:#0d141f;
+      --canvas:#0b111b;
+      --surface:#111a27;
+      --surface-2:#151f2e;
+      --surface-hover:#182435;
+      --border:#293647;
+      --border-strong:#3a4a5f;
+      --text:#e7edf5;
+      --text-strong:#f7f9fc;
+      --muted:#94a3b7;
+      --subtle:#718096;
+      --blue:#63aaf2;
+      --blue-strong:#80bcf7;
+      --blue-soft:rgba(67,142,218,.14);
+      --green:#4dce91;
+      --green-soft:rgba(77,206,145,.13);
+      --amber:#f1bd62;
+      --amber-soft:rgba(241,189,98,.13);
+      --red:#f27f8d;
+      --red-soft:rgba(242,127,141,.13);
+      --shadow:0 1px 2px rgba(0,0,0,.25),0 5px 18px rgba(0,0,0,.12);
+    }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; min-width:320px; min-height:100vh; background:var(--canvas); color:var(--text); font:13px/1.45 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+    a { color:var(--blue); }
+    a:focus-visible { outline:3px solid rgba(99,170,242,.4); outline-offset:2px; }
+    .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    .skip-link { position:fixed; z-index:100; top:7px; left:7px; padding:7px 10px; border-radius:4px; background:var(--text-strong); color:var(--shell); transform:translateY(-160%); }
+    .skip-link:focus { transform:translateY(0); }
+
+    .topbar { position:sticky; z-index:20; top:0; height:52px; display:flex; align-items:center; justify-content:space-between; gap:20px; padding:0 17px; border-bottom:1px solid var(--border); background:var(--topbar); box-shadow:0 1px 8px rgba(0,0,0,.22); }
+    .brand { display:flex; align-items:center; gap:10px; color:var(--text-strong); font-size:13px; font-weight:750; text-decoration:none; white-space:nowrap; }
+    .brand-mark { display:grid; width:24px; height:24px; grid-template-columns:1fr 1fr; gap:2px; padding:3px; border:1px solid #46698f; border-radius:5px; background:#172b42; transform:rotate(45deg); }
+    .brand-mark span { border-radius:1px; background:var(--blue); }
+    .brand-mark span:nth-child(2) { background:var(--green); }
+    .brand-mark span:nth-child(3) { background:#c7dcf2; }
+    .brand-mark span:nth-child(4) { background:var(--amber); }
+    .brand-text { margin-left:2px; }
+    .service-divider { width:1px; height:23px; background:var(--border-strong); }
+    .service-context { color:var(--muted); font-size:12px; font-weight:550; }
+    .topbar-meta { display:flex; align-items:center; gap:17px; color:var(--muted); font-size:11px; }
+    .topbar-meta strong { color:var(--text); font-size:12px; font-weight:650; }
+    .availability { display:flex; align-items:center; gap:7px; white-space:nowrap; }
+    .availability::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 0 3px rgba(77,206,145,.1); }
+    .avatar { display:grid; width:27px; height:27px; place-items:center; border:1px solid var(--border-strong); border-radius:50%; background:#1a2636; color:var(--text-strong); font-size:9px; font-weight:800; }
+
+    .console { display:grid; grid-template-columns:210px minmax(0,1fr); min-height:calc(100vh - 52px); }
+    .sidebar { position:sticky; top:52px; height:calc(100vh - 52px); display:flex; flex-direction:column; border-right:1px solid var(--border); background:var(--sidebar); }
+    .service-name { display:flex; align-items:center; gap:9px; min-height:54px; padding:11px 15px; border-bottom:1px solid var(--border); color:var(--text-strong); font-size:12px; font-weight:700; }
+    .service-icon { display:grid; width:28px; height:28px; flex:none; place-items:center; border:1px solid #31577f; border-radius:5px; background:var(--blue-soft); color:var(--blue); }
+    .service-icon svg { width:16px; height:16px; }
+    .sidebar nav { flex:1; padding:14px 8px; }
+    .nav-label { margin:0 9px 6px; color:var(--subtle); font-size:9px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }
+    .nav-link { display:flex; align-items:center; gap:9px; min-height:34px; margin:2px 0; padding:7px 9px; border-left:2px solid transparent; border-radius:3px; color:var(--muted); font-size:12px; font-weight:550; text-decoration:none; }
+    .nav-link:hover { background:var(--surface-hover); color:var(--text); }
+    .nav-link[aria-current="page"] { border-left-color:var(--blue); background:var(--blue-soft); color:var(--blue-strong); font-weight:700; }
+    .nav-link svg { width:15px; height:15px; flex:none; }
+    .sidebar-footer { padding:12px 15px; border-top:1px solid var(--border); color:var(--subtle); font-size:10px; }
+    .sidebar-footer div { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:4px; color:var(--muted); }
+    .readonly { padding:2px 6px; border:1px solid var(--border); border-radius:999px; background:var(--surface); color:var(--muted); font-size:9px; font-weight:750; letter-spacing:.04em; text-transform:uppercase; }
+
+    main { min-width:0; padding:19px clamp(17px,2.5vw,34px) 30px; }
+    .content { width:100%; max-width:1480px; margin:0 auto; }
+    .breadcrumbs { display:flex; align-items:center; gap:6px; margin-bottom:11px; color:var(--subtle); font-size:10px; }
+    .breadcrumbs a { color:var(--muted); text-decoration:none; }
+    .breadcrumbs a:hover { text-decoration:underline; }
+    .breadcrumbs svg { width:10px; height:10px; }
+    .page-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin-bottom:17px; }
+    .page-kicker { margin:0 0 3px; color:var(--blue); font-size:9px; font-weight:800; letter-spacing:.11em; text-transform:uppercase; }
+    h1 { margin:0; color:var(--text-strong); font-size:25px; line-height:1.2; letter-spacing:-.025em; }
+    .page-description { max-width:680px; margin:5px 0 0; color:var(--muted); font-size:12px; }
+    .refresh-card { display:flex; align-items:center; gap:9px; min-width:166px; padding:7px 10px; border:1px solid var(--border); border-radius:5px; background:var(--surface); box-shadow:var(--shadow); }
+    .refresh-card.refresh-error { border-color:#8f4852; }
+    .refresh-icon { display:grid; width:25px; height:25px; flex:none; place-items:center; border-radius:50%; background:var(--green-soft); color:var(--green); }
+    .refresh-card.refresh-error .refresh-icon { background:var(--red-soft); color:var(--red); }
+    .refresh-icon svg { width:13px; height:13px; }
+    .refresh-card span { display:block; color:var(--subtle); font-size:8px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }
+    .refresh-card strong { display:block; margin-top:1px; color:var(--text); font-size:10px; font-weight:650; }
+
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px; margin-bottom:14px; }
+    .metric { position:relative; min-height:82px; overflow:hidden; padding:12px 14px; border:1px solid var(--border); border-radius:5px; background:var(--surface); box-shadow:var(--shadow); }
+    .metric::before { content:""; position:absolute; inset:0 auto 0 0; width:2px; background:var(--blue); }
+    .metric.running::before { background:var(--green); }
+    .metric.pending::before { background:var(--amber); }
+    .metric.inactive::before { background:var(--subtle); }
+    .metric-label { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:10px; font-weight:650; }
+    .metric-label svg { width:13px; height:13px; color:var(--subtle); }
+    .metric strong { display:block; margin-top:7px; color:var(--text-strong); font-size:24px; line-height:1; font-weight:650; letter-spacing:-.03em; }
+    .metric p { margin:5px 0 0; color:var(--subtle); font-size:9px; }
+
+    .panel { border:1px solid var(--border); border-radius:5px; background:var(--surface); box-shadow:var(--shadow); }
+    .panel-header { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:58px; padding:11px 13px; border-bottom:1px solid var(--border); }
+    h2 { margin:0; color:var(--text-strong); font-size:14px; line-height:1.3; letter-spacing:-.01em; }
+    .panel-header p { margin:2px 0 0; color:var(--subtle); font-size:10px; }
+    .panel-tools { display:flex; align-items:center; gap:7px; }
+    .resource-count { padding:4px 7px; border:1px solid var(--border); border-radius:3px; background:var(--surface-2); color:var(--muted); font-size:9px; font-weight:650; white-space:nowrap; }
+    .refresh-button { display:inline-flex; align-items:center; gap:6px; min-height:28px; padding:5px 8px; border:1px solid var(--border-strong); border-radius:3px; background:var(--surface-2); color:var(--text); font-size:10px; font-weight:700; text-decoration:none; }
+    .refresh-button:hover { border-color:var(--blue); background:var(--blue-soft); color:var(--blue-strong); }
+    .refresh-button svg { width:12px; height:12px; }
+
+    .table-wrap { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; text-align:left; }
+    th { height:34px; padding:7px 11px; border-bottom:1px solid var(--border); background:var(--surface-2); color:var(--subtle); font-size:8px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; white-space:nowrap; }
+    td { height:58px; padding:9px 11px; border-bottom:1px solid rgba(41,54,71,.72); color:var(--text); font-size:10px; vertical-align:middle; }
+    tbody tr:last-child td { border-bottom:0; }
+    tbody tr:hover { background:var(--surface-hover); }
+    .resource-cell { display:flex; align-items:center; gap:9px; min-width:205px; }
+    .resource-glyph { display:grid; width:28px; height:28px; flex:none; place-items:center; border:1px solid #31577f; border-radius:4px; background:var(--blue-soft); color:var(--blue); }
+    .resource-glyph svg { width:15px; height:15px; }
+    .resource-name { display:block; max-width:250px; color:var(--text-strong); font-size:11px; font-weight:700; overflow-wrap:anywhere; }
+    .resource-meta { display:block; margin-top:2px; color:var(--subtle); font-size:8px; overflow-wrap:anywhere; }
+    code { color:#a9c9e9; font:8px/1.4 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+    .status-badge { display:inline-flex; align-items:center; gap:5px; padding:3px 7px; border-radius:999px; font-size:9px; font-weight:750; white-space:nowrap; }
+    .status-badge::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .status-running { background:var(--green-soft); color:var(--green); }
+    .status-pending { background:var(--amber-soft); color:var(--amber); }
+    .status-stopped { background:var(--red-soft); color:var(--red); }
+    .status-hibernated { background:var(--blue-soft); color:var(--blue); }
+    .status-unknown { background:rgba(113,128,150,.14); color:#9ba9bb; }
+    .status-detail { display:block; max-width:210px; margin-top:3px; color:var(--subtle); font-size:8px; overflow-wrap:anywhere; }
+    .endpoint { display:block; max-width:280px; overflow:hidden; color:var(--blue); font-size:10px; font-weight:600; text-decoration:none; text-overflow:ellipsis; white-space:nowrap; }
+    .endpoint:hover { color:var(--blue-strong); text-decoration:underline; }
+    .cell-subtext { display:block; margin-top:2px; color:var(--subtle); font-size:8px; }
+    .row-actions { display:flex; align-items:center; justify-content:flex-end; gap:6px; min-width:148px; }
+    .row-actions form { margin:0; }
+    .open-link,.control-button { display:inline-flex; min-height:27px; align-items:center; justify-content:center; gap:5px; padding:5px 8px; border-radius:3px; font:inherit; font-size:9px; font-weight:750; white-space:nowrap; }
+    .open-link { border:1px solid #3d6e9e; background:var(--blue-soft); color:var(--blue-strong); text-decoration:none; }
+    .open-link:hover { border-color:var(--blue); background:rgba(67,142,218,.22); }
+    .open-link svg { width:11px; height:11px; }
+    .control-button { border:1px solid #806432; background:var(--amber-soft); color:var(--amber); cursor:pointer; }
+    .control-button:hover { border-color:var(--amber); background:rgba(241,189,98,.2); }
+    .control-button:disabled { max-width:126px; overflow:hidden; border-color:var(--border); background:var(--surface-2); color:var(--subtle); cursor:not-allowed; text-overflow:ellipsis; }
+
+    .empty-state { display:grid; min-height:220px; padding:32px 20px; place-items:center; text-align:center; }
+    .empty-icon { display:grid; width:44px; height:44px; margin:0 auto 11px; place-items:center; border:1px solid var(--border); border-radius:50%; background:var(--surface-2); color:var(--blue); }
+    .empty-icon svg { width:21px; height:21px; }
+    .empty-state h3 { margin:0; color:var(--text-strong); font-size:13px; }
+    .empty-state p { max-width:380px; margin:5px auto 0; color:var(--subtle); font-size:10px; }
+
+    .details-panel { margin-top:13px; }
+    .details-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .detail { min-height:62px; padding:11px 13px; border-right:1px solid var(--border); }
+    .detail:last-child { border-right:0; }
+    .detail dt { margin:0 0 3px; color:var(--subtle); font-size:8px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }
+    .detail dd { margin:0; color:var(--text); font-size:10px; font-weight:650; }
+    .detail dd span { display:block; margin-top:1px; color:var(--subtle); font-size:8px; font-weight:400; }
+    footer { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-top:13px; color:var(--subtle); font-size:9px; }
+    footer strong { color:var(--muted); font-weight:650; }
+
+    @media (max-width:1050px) {
+      .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .details-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .detail:nth-child(2) { border-right:0; }
+      .detail:nth-child(-n+2) { border-bottom:1px solid var(--border); }
+    }
+    @media (max-width:800px) {
+      .topbar { padding:0 13px; }
+      .service-context,.service-divider,.scope { display:none; }
+      .console { display:block; }
+      .sidebar { position:static; width:100%; height:auto; border-right:0; border-bottom:1px solid var(--border); }
+      .service-name,.sidebar-footer,.nav-label { display:none; }
+      .sidebar nav { display:flex; gap:3px; overflow-x:auto; padding:6px 10px; }
+      .nav-link { flex:none; min-height:31px; padding:6px 9px; border-left:0; border-bottom:2px solid transparent; }
+      .nav-link[aria-current="page"] { border-bottom-color:var(--blue); }
+      main { padding:16px 13px 26px; }
+      .page-heading { align-items:stretch; flex-direction:column; gap:10px; }
+      .refresh-card { align-self:flex-start; }
+      .panel-header { align-items:flex-start; flex-direction:column; gap:8px; }
+      .panel-tools { width:100%; justify-content:space-between; }
+      .table-wrap { overflow:visible; }
+      table,tbody,tr,td { display:block; width:100%; }
+      thead { display:none; }
+      tbody { padding:0 11px; }
+      tbody tr { padding:8px 0; border-bottom:1px solid var(--border); }
+      tbody tr:last-child { border-bottom:0; }
+      td { display:grid; height:auto; grid-template-columns:98px minmax(0,1fr); align-items:start; gap:8px; padding:6px 0; border:0; }
+      td::before { content:attr(data-label); padding-top:1px; color:var(--subtle); font-size:8px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
+      tbody tr:hover { background:transparent; }
+      .resource-cell { min-width:0; }
+      .endpoint { max-width:none; }
+    }
+    @media (max-width:520px) {
+      .brand-text { display:none; }
+      .topbar-meta { gap:10px; }
+      .availability span { display:none; }
+      .metrics { grid-template-columns:1fr 1fr; gap:7px; }
+      .metric { min-height:78px; padding:10px 11px; }
+      .metric strong { font-size:21px; }
+      .details-grid { grid-template-columns:1fr; }
+      .detail,.detail:nth-child(2) { border-right:0; border-bottom:1px solid var(--border); }
+      .detail:last-child { border-bottom:0; }
+      footer { align-items:flex-start; flex-direction:column; gap:4px; }
+    }
+    @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+  </style>
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+    <span class="brand-text">Dire Kiwi Cloud</span>
+    <span class="service-divider" aria-hidden="true"></span>
+    <span class="service-context">Preview Service</span>
+  </div>
+  <div class="topbar-meta">
+    <span class="scope">Scope&nbsp; <strong>Global</strong></span>
+    <span class="availability"><span>Console available</span></span>
+    <span class="avatar" aria-label="Dire Kiwi">DK</span>
+  </div>
+</header>
+<div class="console">
+  <aside class="sidebar" aria-label="Service navigation">
+    <div class="service-name">
+      <span class="service-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m4 8 8-4 8 4-8 4-8-4Z"/><path d="m4 12 8 4 8-4M4 16l8 4 8-4"/></svg></span>
+      Preview deployments
+    </div>
+    <nav>
+      <p class="nav-label">Service</p>
+      <a class="nav-link" href="#overview" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview</a>
+      <a class="nav-link" href="#deployments"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m4 8 8-4 8 4-8 4-8-4Z"/><path d="m4 12 8 4 8-4M4 16l8 4 8-4"/></svg>Deployments</a>
+      <a class="nav-link" href="#service-details"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8v.01"/></svg>Service details</a>
+    </nav>
+    <div class="sidebar-footer">Console mode<div><span>Resource access</span><span class="readonly">{{if .ControlsEnabled}}Controls enabled{{else}}Read only{{end}}</span></div></div>
+  </aside>
+
+  <main id="main-content">
+    <div class="content">
+      <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Console</a><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg><span>Preview deployments</span></nav>
+      <section class="page-heading" id="overview" aria-labelledby="page-title">
+        <div><p class="page-kicker">Preview service</p><h1 id="page-title">Deployment overview</h1><p class="page-description">Monitor preview environments, endpoints, lifecycle state, and access configuration.</p></div>
+        <div class="refresh-card" data-refresh-card aria-label="Automatic refresh interval">
+          <span class="refresh-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg></span>
+          <div><span>Live updates</span><strong data-refresh-detail>Every 10 seconds</strong></div>
+        </div>
+      </section>
+
+      {{block "dashboardState" .}}
+      <div id="dashboard-state" data-generated-at="{{.GeneratedAt}}">
+        <section class="metrics" aria-label="Deployment summary">
+          <article class="metric"><div class="metric-label"><span>Total deployments</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m4 8 8-4 8 4-8 4-8-4Z"/><path d="m4 12 8 4 8-4M4 16l8 4 8-4"/></svg></div><strong>{{len .Deployments}}</strong><p>Managed preview resources</p></article>
+          <article class="metric running"><div class="metric-label"><span>Running</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></div><strong>{{statusCount .Deployments "status-running"}}</strong><p>Containers currently running</p></article>
+          <article class="metric pending"><div class="metric-label"><span>Transitioning</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><strong>{{hibernationCount .Deployments "transitioning"}}</strong><p>Hibernating or resuming</p></article>
+          <article class="metric inactive"><div class="metric-label"><span>Hibernated</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg></div><strong>{{hibernationCount .Deployments "hibernated"}}</strong><p>Stopped until the next request</p></article>
+        </section>
+
+        <section class="panel" id="deployments" aria-labelledby="deployments-title">
+          <header class="panel-header">
+            <div><h2 id="deployments-title">Deployments</h2><p>Resource inventory for this preview host</p></div>
+            <div class="panel-tools">
+              <span class="resource-count">{{len .Deployments}} {{if eq (len .Deployments) 1}}resource{{else}}resources{{end}}</span>
+              <a class="refresh-button" href="/" data-dashboard-refresh><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg>Refresh</a>
+            </div>
+          </header>
+          {{if .Deployments}}
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Deployment</th><th>Container</th><th>Hibernation</th><th>Endpoint</th><th>Created</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+              <tbody>
+                {{range .Deployments}}
+                <tr data-deployment-id="{{.ID}}">
+                  <td data-label="Deployment"><div class="resource-cell"><span class="resource-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m4 8 8-4 8 4-8 4-8-4Z"/><path d="M4 8v8l8 4 8-4V8M12 12v8"/></svg></span><span><span class="resource-name">{{displayName .Deployment}}</span><span class="resource-meta">ID <code>{{.ID}}</code> · port {{.Port}}</span></span></div></td>
+                  <td data-label="Container"><span class="status-badge {{statusClass .Status}}">{{statusLabel .Status}}</span>{{if .StatusDetail}}<span class="status-detail">{{.StatusDetail}}</span>{{end}}</td>
+                  <td data-label="Hibernation"><span class="status-badge {{hibernationClass .HibernationState}}">{{hibernationLabel .HibernationState}}</span>{{if and $.ControlsEnabled .ControlHint}}<span class="status-detail">{{.ControlHint}}</span>{{end}}</td>
+                  <td data-label="Endpoint"><a class="endpoint" href="{{.URL}}" target="_blank" rel="noopener noreferrer" title="{{.URL}}">{{.URL}}</a></td>
+                  <td data-label="Created">{{createdTime .CreatedAt}}</td>
+                  <td data-label="Actions"><div class="row-actions"><a class="open-link" href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.PreviewActionLabel}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></svg></a>{{if $.ControlsEnabled}}{{if .CanHibernate}}<form method="post" action="/dashboard/hibernate"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="csrf" value="{{.CSRFToken}}"><button class="control-button" type="submit">Hibernate</button></form>{{else}}<button class="control-button" type="button" disabled title="{{.ControlHint}}">{{.ControlLabel}}</button>{{end}}{{end}}</div></td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          {{else}}
+          <div class="empty-state"><div><span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m4 8 8-4 8 4-8 4-8-4Z"/><path d="M4 8v8l8 4 8-4V8M12 12v8"/></svg></span><h3>No deployments found</h3><p>Deploy a preview with previewctl and it will appear in this resource inventory automatically.</p></div></div>
+          {{end}}
+        </section>
+      </div>
+      {{end}}
+
+      <section class="panel details-panel" id="service-details" aria-labelledby="details-title">
+        <header class="panel-header"><div><h2 id="details-title">Service details</h2><p>Console and resource metadata</p></div></header>
+        <dl class="details-grid">
+          <div class="detail"><dt>Scope</dt><dd>Global<span>All managed preview routes</span></dd></div>
+          <div class="detail"><dt>Source of truth</dt><dd>Docker<span>Containers and labels</span></dd></div>
+          <div class="detail"><dt>Refresh policy</dt><dd>Automatic<span>Every 10 seconds</span></dd></div>
+          <div class="detail"><dt>Console access</dt><dd>{{if .ControlsEnabled}}Authenticated controls{{else}}Read only{{end}}<span>{{if .ControlsEnabled}}Safe hibernation actions enabled{{else}}Use previewctl for lifecycle actions{{end}}</span></dd></div>
+        </dl>
+      </section>
+      <footer><span>Dire Kiwi preview infrastructure</span><span>Resource data generated <strong id="dashboard-generated-at">{{.GeneratedAt}}</strong></span></footer>
+      <p class="visually-hidden" id="dashboard-refresh-status" role="status" aria-live="polite"></p>
+    </div>
+  </main>
+</div>
+</body>
+</html>

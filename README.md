@@ -149,9 +149,12 @@ previewctl deploy --manifest preview.json --output json .
 Open the deployment dashboard at the orchestrator's root URL, such as
 `https://api.preview.example.com/`. It reports each preview's container and
 hibernation state. Manual controls are hidden unless the separately
-authenticated dashboard controls described below are configured. The bundled
-Traefik rule exposes only the exact dashboard paths. Health and `/v1/*` remain
-on the loopback orchestrator port for SSH-forwarded automation.
+authenticated dashboard controls described below are configured. The initial
+view is server-rendered, then a bundled same-origin script refreshes only the
+resource metrics and table every 10 seconds without reloading the page; browsers
+without JavaScript retain the full-page refresh fallback. The bundled Traefik
+rule exposes only the exact dashboard paths. Health and `/v1/*` remain on the
+loopback orchestrator port for SSH-forwarded automation.
 
 ## Deploy from GitHub Actions
 

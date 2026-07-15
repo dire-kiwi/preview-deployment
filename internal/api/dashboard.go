@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/hex"
 	"errors"
 	"html/template"
@@ -18,132 +19,11 @@ import (
 	"github.com/dire-kiwi/preview-deployment/internal/orchestrator"
 )
 
-var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
-	"displayName": func(deployment orchestrator.Deployment) string {
-		if name := strings.TrimSpace(deployment.Name); name != "" {
-			return name
-		}
-		return "Unnamed preview"
-	},
-	"statusClass": func(status string) string {
-		switch strings.ToLower(strings.TrimSpace(status)) {
-		case "running":
-			return "status-running"
-		case "created", "restarting":
-			return "status-pending"
-		case "exited", "dead":
-			return "status-stopped"
-		default:
-			return "status-unknown"
-		}
-	},
-	"hibernationClass": func(state string) string {
-		switch state {
-		case "active":
-			return "status-running"
-		case "hibernating", "resuming":
-			return "status-pending"
-		case "hibernated":
-			return "status-hibernated"
-		default:
-			return "status-unknown"
-		}
-	},
-	"hibernationLabel": func(state string) string {
-		switch state {
-		case "active":
-			return "Active"
-		case "hibernating":
-			return "Hibernating"
-		case "hibernated":
-			return "Hibernated"
-		case "resuming":
-			return "Resuming"
-		default:
-			return "Unavailable"
-		}
-	},
-	"createdTime": func(created time.Time) string {
-		if created.IsZero() {
-			return "Unknown"
-		}
-		return created.Local().Format("2 Jan 2006, 15:04 MST")
-	},
-}).Parse(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="10">
-  <title>Preview deployments</title>
-  <style>
-    :root { color-scheme: dark; --bg:#070b12; --panel:#0f1623; --panel-2:#131d2d; --line:#26354d; --text:#edf4ff; --muted:#8fa2bd; --blue:#5ea8ff; --green:#54d69b; --amber:#ffca6a; --red:#ff7f8f; }
-    * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; background:radial-gradient(circle at 15% -10%,#18365d 0,transparent 34rem),var(--bg); color:var(--text); font:15px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    main { width:min(1180px,calc(100% - 32px)); margin:0 auto; padding:52px 0 64px; }
-    header { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin-bottom:30px; }
-    .eyebrow { margin:0 0 8px; color:var(--blue); font-size:12px; font-weight:800; letter-spacing:.16em; text-transform:uppercase; }
-    h1 { margin:0; font-size:clamp(32px,5vw,54px); line-height:1; letter-spacing:-.045em; }
-    .summary { color:var(--muted); text-align:right; }
-    .summary strong { display:block; color:var(--text); font-size:30px; line-height:1; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(285px,1fr)); gap:16px; }
-    article { min-width:0; padding:22px; border:1px solid var(--line); border-radius:18px; background:linear-gradient(145deg,rgba(19,29,45,.97),rgba(11,17,28,.97)); box-shadow:0 18px 44px rgba(0,0,0,.24); }
-    .card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
-    .badges { display:flex; flex:none; flex-wrap:wrap; justify-content:flex-end; gap:7px; }
-    h2 { min-width:0; margin:0; overflow-wrap:anywhere; font-size:19px; letter-spacing:-.02em; }
-    .status { flex:none; padding:4px 9px; border:1px solid currentColor; border-radius:999px; font-size:11px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }
-    .status-running { color:var(--green); } .status-pending { color:var(--amber); } .status-stopped { color:var(--red); } .status-hibernated { color:var(--blue); } .status-unknown { color:var(--muted); }
-    dl { display:grid; grid-template-columns:auto 1fr; gap:8px 14px; margin:20px 0; color:var(--muted); font-size:13px; }
-    dt { color:#7085a2; } dd { min-width:0; margin:0; color:var(--text); overflow-wrap:anywhere; }
-    code { color:#bed7f7; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
-    .actions { display:grid; grid-template-columns:1fr auto; gap:9px; }
-    .actions a { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 13px; border:1px solid #315781; border-radius:11px; background:#142945; color:#cfe6ff; text-decoration:none; font-weight:750; }
-    .actions a:hover { border-color:var(--blue); background:#19375d; }
-    form { margin:0; }
-    button { min-height:44px; padding:10px 13px; border:1px solid #8a6530; border-radius:11px; background:#352713; color:#ffd99a; cursor:pointer; font:inherit; font-weight:800; }
-    button:hover { border-color:var(--amber); background:#473419; }
-    button:disabled { border-color:var(--line); background:#111827; color:var(--muted); cursor:not-allowed; }
-    .action-hint { grid-column:1/-1; margin:0; color:var(--muted); font-size:12px; line-height:1.45; }
-    button:focus-visible, a:focus-visible { outline:3px solid #5ea8ff66; outline-offset:2px; }
-    .empty { padding:56px 24px; border:1px dashed var(--line); border-radius:18px; color:var(--muted); text-align:center; }
-    footer { margin-top:28px; color:#6f829d; font-size:12px; }
-    @media (max-width:640px) { main { padding-top:32px; } header { align-items:flex-start; flex-direction:column; } .summary { text-align:left; } }
-  </style>
-</head>
-<body>
-<main>
-  <header>
-    <div><p class="eyebrow">Dire Kiwi infrastructure</p><h1>Preview deployments</h1></div>
-    <div class="summary"><strong>{{len .Deployments}}</strong>{{if eq (len .Deployments) 1}}deployment{{else}}deployments{{end}}</div>
-  </header>
-  {{if .Deployments}}
-  <section class="grid" aria-label="Deployments">
-    {{range .Deployments}}
-    <article>
-      <div class="card-head">
-        <h2>{{displayName .Deployment}}</h2>
-        <div class="badges"><span class="status {{statusClass .Status}}">{{.Status}}</span><span class="status {{hibernationClass .HibernationState}}">{{hibernationLabel .HibernationState}}</span></div>
-      </div>
-      <dl>
-        <dt>ID</dt><dd><code>{{.ID}}</code></dd>
-        <dt>Hibernation</dt><dd>{{hibernationLabel .HibernationState}}</dd>
-        <dt>Port</dt><dd>{{.Port}}</dd>
-        <dt>Created</dt><dd>{{createdTime .CreatedAt}}</dd>
-        {{if .StatusDetail}}<dt>Details</dt><dd>{{.StatusDetail}}</dd>{{end}}
-      </dl>
-      <div class="actions">
-        <a href="{{.URL}}" target="_blank" rel="noopener noreferrer"><span>{{.PreviewActionLabel}}</span><span aria-hidden="true">↗</span></a>
-        {{if $.ControlsEnabled}}{{if .CanHibernate}}<form method="post" action="/dashboard/hibernate"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="csrf" value="{{.CSRFToken}}"><button type="submit">Hibernate now</button></form>{{else}}<button type="button" disabled>{{.ControlLabel}}</button>{{end}}{{end}}
-        {{if and $.ControlsEnabled .ControlHint}}<p class="action-hint">{{.ControlHint}}</p>{{end}}
-      </div>
-    </article>
-    {{end}}
-  </section>
-  {{else}}<div class="empty">No preview deployments are currently running.</div>{{end}}
-  <footer>{{if .ControlsEnabled}}Authenticated controls enabled{{else}}Read-only view{{end}} · refreshes every 10 seconds · generated {{.GeneratedAt}}</footer>
-</main>
-</body>
-</html>`))
+//go:embed dashboard.html
+var dashboardHTML string
+
+//go:embed dashboard.js
+var dashboardScript string
 
 type dashboardDeployment struct {
 	orchestrator.Deployment
@@ -160,7 +40,118 @@ type dashboardData struct {
 	ControlsEnabled bool
 }
 
+var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
+	"displayName": func(deployment orchestrator.Deployment) string {
+		if name := strings.TrimSpace(deployment.Name); name != "" {
+			return name
+		}
+		return "Unnamed preview"
+	},
+	"statusClass":      dashboardStatusClass,
+	"statusLabel":      dashboardStatusLabel,
+	"statusCount":      dashboardStatusCount,
+	"hibernationClass": dashboardHibernationClass,
+	"hibernationLabel": dashboardHibernationLabel,
+	"hibernationCount": dashboardHibernationCount,
+	"createdTime": func(created time.Time) string {
+		if created.IsZero() {
+			return "Unknown"
+		}
+		return created.Local().Format("2 Jan 2006, 15:04 MST")
+	},
+}).Parse(dashboardHTML))
+
+func dashboardStatusClass(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running":
+		return "status-running"
+	case "created", "restarting", "starting", "removing":
+		return "status-pending"
+	case "exited", "dead", "paused":
+		return "status-stopped"
+	default:
+		return "status-unknown"
+	}
+}
+
+func dashboardStatusLabel(status string) string {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	switch normalized {
+	case "running":
+		return "Running"
+	case "created":
+		return "Created"
+	case "restarting":
+		return "Restarting"
+	case "starting":
+		return "Starting"
+	case "removing":
+		return "Removing"
+	case "exited":
+		return "Exited"
+	case "dead":
+		return "Failed"
+	case "paused":
+		return "Paused"
+	case "":
+		return "Unknown"
+	default:
+		return status
+	}
+}
+
+func dashboardStatusCount(deployments []dashboardDeployment, class string) int {
+	count := 0
+	for _, deployment := range deployments {
+		if dashboardStatusClass(deployment.Status) == class {
+			count++
+		}
+	}
+	return count
+}
+
+func dashboardHibernationClass(state string) string {
+	switch state {
+	case orchestrator.HibernationStateActive:
+		return "status-running"
+	case orchestrator.HibernationStateHibernating, orchestrator.HibernationStateResuming:
+		return "status-pending"
+	case orchestrator.HibernationStateHibernated:
+		return "status-hibernated"
+	default:
+		return "status-unknown"
+	}
+}
+
+func dashboardHibernationLabel(state string) string {
+	switch state {
+	case orchestrator.HibernationStateActive:
+		return "Active"
+	case orchestrator.HibernationStateHibernating:
+		return "Hibernating"
+	case orchestrator.HibernationStateHibernated:
+		return "Hibernated"
+	case orchestrator.HibernationStateResuming:
+		return "Resuming"
+	default:
+		return "Unavailable"
+	}
+}
+
+func dashboardHibernationCount(deployments []dashboardDeployment, state string) int {
+	count := 0
+	for _, deployment := range deployments {
+		if deployment.HibernationState == state || state == "transitioning" && (deployment.HibernationState == orchestrator.HibernationStateHibernating || deployment.HibernationState == orchestrator.HibernationStateResuming) {
+			count++
+		}
+	}
+	return count
+}
+
 func (a *API) dashboard(writer http.ResponseWriter, request *http.Request) {
+	if serveDashboardAsset(writer, request) {
+		return
+	}
 	setDashboardHeaders(writer.Header())
 	deployments, err := a.service.List(request.Context())
 	if err != nil {
@@ -172,14 +163,41 @@ func (a *API) dashboard(writer http.ResponseWriter, request *http.Request) {
 	for _, deployment := range deployments {
 		cards = append(cards, a.dashboardCard(deployment))
 	}
-	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := dashboardTemplate.Execute(writer, dashboardData{
+	data := dashboardData{
 		Deployments:     cards,
 		GeneratedAt:     time.Now().Format("15:04:05 MST"),
 		ControlsEnabled: a.dashboardControlsEnabled,
-	}); err != nil {
+	}
+	if err := renderDashboardResponse(writer, request, data); err != nil {
 		a.logger.Error("could not write deployment dashboard", "error", err)
 	}
+}
+
+func renderDashboardResponse(writer http.ResponseWriter, request *http.Request, data dashboardData) error {
+	templateName := "dashboard"
+	if request.Header.Get("X-Dashboard-Refresh") == "1" {
+		templateName = "dashboardState"
+		writer.Header().Set("Vary", "X-Dashboard-Refresh")
+	}
+	setDashboardHeaders(writer.Header())
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	return dashboardTemplate.ExecuteTemplate(writer, templateName, data)
+}
+
+func serveDashboardAsset(writer http.ResponseWriter, request *http.Request) bool {
+	assets, requested := request.URL.Query()["asset"]
+	if !requested {
+		return false
+	}
+	setDashboardHeaders(writer.Header())
+	if len(assets) != 1 || assets[0] != "dashboard.js" {
+		http.NotFound(writer, request)
+		return true
+	}
+	writer.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	writer.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = io.WriteString(writer, dashboardScript)
+	return true
 }
 
 func (a *API) dashboardCard(deployment orchestrator.Deployment) dashboardDeployment {
@@ -309,7 +327,7 @@ func (a *API) writeDashboardServiceError(writer http.ResponseWriter, err error) 
 
 func setDashboardHeaders(header http.Header) {
 	header.Set("Cache-Control", "no-store")
-	header.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+	header.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 	// A same-origin policy keeps cross-origin navigation private while allowing
 	// basic HTML form POSTs to carry their real Origin instead of "null".
 	header.Set("Referrer-Policy", "same-origin")

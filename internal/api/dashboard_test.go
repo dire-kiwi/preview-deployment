@@ -92,7 +92,7 @@ func TestDashboardCardsMakeControlEligibilityExplicit(t *testing.T) {
 		},
 		{
 			name: "hibernated", deployment: orchestrator.Deployment{ID: "def456def456", URL: "https://def456def456.preview.example.test", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateHibernated},
-			previewAction: "Resume preview", controlLabel: "Already hibernated", controlHint: "Opening the preview safely wakes the same container.",
+			previewAction: "Resume preview",
 		},
 		{
 			name: "hibernating", deployment: orchestrator.Deployment{ID: "0123456789ab", HibernationEnabled: true, HibernationState: orchestrator.HibernationStateHibernating},
@@ -131,9 +131,14 @@ func TestDashboardCardsMakeControlEligibilityExplicit(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := output.String()
-	for _, expected := range []string{`href="https://def456def456.preview.example.test"`, "Resume preview", "Already hibernated", "Hibernating…", "Resuming…", "Hibernation unavailable", "Redeploy this preview to enable safe request-driven wake-up."} {
+	for _, expected := range []string{`href="https://def456def456.preview.example.test"`, "Resume preview", "Hibernating…", "Resuming…", "Hibernation unavailable", "Redeploy this preview to enable safe request-driven wake-up."} {
 		if !strings.Contains(html, expected) {
 			t.Errorf("dashboard does not contain %q", expected)
+		}
+	}
+	for _, redundant := range []string{">Already hibernated</button>", "Opening the preview safely wakes the same container."} {
+		if strings.Contains(html, redundant) {
+			t.Errorf("dashboard rendered redundant hibernated-state content %q", redundant)
 		}
 	}
 	if got := strings.Count(html, `action="/dashboard/hibernate"`); got != 1 {

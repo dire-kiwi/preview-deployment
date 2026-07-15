@@ -220,8 +220,6 @@ func (a *API) dashboardCard(deployment orchestrator.Deployment) dashboardDeploym
 		card.CSRFToken = a.dashboardCSRFToken(deployment.ID)
 	case orchestrator.HibernationStateHibernated:
 		card.PreviewActionLabel = "Resume preview"
-		card.ControlLabel = "Already hibernated"
-		card.ControlHint = "Opening the preview safely wakes the same container."
 	case orchestrator.HibernationStateHibernating:
 		card.ControlLabel = "Hibernating…"
 		card.ControlHint = "A request that arrives during shutdown will resume this preview."

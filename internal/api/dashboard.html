@@ -132,6 +132,8 @@
     .status-hibernated { background:var(--blue-soft); color:var(--blue); }
     .status-unknown { background:rgba(113,128,150,.14); color:#9ba9bb; }
     .status-detail { display:block; max-width:210px; margin-top:3px; color:var(--subtle); font-size:8px; overflow-wrap:anywhere; }
+    .status-detail.standalone { margin-top:0; color:var(--muted); font-size:9px; }
+    .empty-value { color:var(--subtle); }
     .endpoint { display:block; max-width:280px; overflow:hidden; color:var(--blue); font-size:10px; font-weight:600; text-decoration:none; text-overflow:ellipsis; white-space:nowrap; }
     .endpoint:hover { color:var(--blue-strong); text-decoration:underline; }
     .cell-subtext { display:block; margin-top:2px; color:var(--subtle); font-size:8px; }
@@ -269,12 +271,13 @@
           {{if .Deployments}}
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Deployment</th><th>Container</th><th>Hibernation</th><th>Endpoint</th><th>Created</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+              <thead><tr><th>Deployment</th><th>Container</th><th>Status details</th><th>Hibernation</th><th>Endpoint</th><th>Created</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
               <tbody>
                 {{range .Deployments}}
                 <tr data-deployment-id="{{.ID}}">
                   <td data-label="Deployment"><div class="resource-cell"><span class="resource-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m4 8 8-4 8 4-8 4-8-4Z"/><path d="M4 8v8l8 4 8-4V8M12 12v8"/></svg></span><span><span class="resource-name">{{displayName .Deployment}}</span><span class="resource-meta">ID <code>{{.ID}}</code> · port {{.Port}}</span></span></div></td>
-                  <td data-label="Container"><span class="status-badge {{statusClass .Status}}">{{statusLabel .Status}}</span>{{if .StatusDetail}}<span class="status-detail">{{.StatusDetail}}</span>{{end}}</td>
+                  <td data-label="Container"><span class="status-badge {{statusClass .Status}}">{{statusLabel .Status}}</span></td>
+                  <td data-label="Status details">{{if .StatusDetail}}<span class="status-detail standalone">{{.StatusDetail}}</span>{{else}}<span class="empty-value">—</span>{{end}}</td>
                   <td data-label="Hibernation"><span class="status-badge {{hibernationClass .HibernationState}}">{{hibernationLabel .HibernationState}}</span>{{if and $.ControlsEnabled .ControlHint}}<span class="status-detail">{{.ControlHint}}</span>{{end}}</td>
                   <td data-label="Endpoint"><a class="endpoint" href="{{.URL}}" target="_blank" rel="noopener noreferrer" title="{{.URL}}">{{.URL}}</a></td>
                   <td data-label="Created">{{createdTime .CreatedAt}}</td>

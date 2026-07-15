@@ -38,7 +38,7 @@ func TestDashboardTemplateEscapesAndShowsDeployments(t *testing.T) {
 	html := output.String()
 	for _, expected := range []string{
 		"Preview deployments", "Deployment overview", "Dire Kiwi Cloud", "abc123abc123", "https://abc123abc123.preview.example.test",
-		"status-running", "Active", "Up 2 minutes", "1 resource", "Open preview", "Service details", "color-scheme:dark",
+		"status-running", "Active", "Up 2 minutes", "1 resource", "Open preview", "Service details", "color-scheme:dark", `<th>Status details</th>`, `data-label="Status details"`,
 		`action="/dashboard/hibernate"`, `name="csrf" value="csrf-token"`, "Hibernate now",
 		`<noscript><meta http-equiv="refresh" content="10"></noscript>`, `src="/?asset=dashboard.js"`, `id="dashboard-state"`,
 	} {
